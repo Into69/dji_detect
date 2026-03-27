@@ -1,0 +1,1213 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Sensor</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      background: #0d1117;
+      color: #e6edf3;
+      display: flex;
+      height: 100vh;
+      overflow: hidden;
+    }
+
+    /* ── Sidebar ── */
+    #sidebar {
+      width: 320px;
+      min-width: 260px;
+      background: #161b22;
+      border-right: 1px solid #30363d;
+      display: flex;
+      flex-direction: column;
+      z-index: 1000;
+    }
+
+    #sidebar-header {
+      padding: 12px 14px;
+      background: #21262d;
+      border-bottom: 1px solid #30363d;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-shrink: 0;
+    }
+
+    #sidebar-header h1 { font-size: 14px; font-weight: 600; letter-spacing: 0.4px; }
+
+    #status-dot {
+      width: 9px; height: 9px;
+      border-radius: 50%;
+      background: #f85149;
+      flex-shrink: 0;
+      transition: background 0.3s;
+    }
+    #status-dot.connected { background: #3fb950; }
+
+    #drone-count { margin-left: auto; font-size: 11px; color: #8b949e; }
+
+    #btn-settings {
+      background: none;
+      border: none;
+      color: #8b949e;
+      cursor: pointer;
+      font-size: 16px;
+      padding: 2px 4px;
+      border-radius: 4px;
+      transition: color 0.2s, background 0.2s;
+      line-height: 1;
+    }
+    #btn-settings:hover { color: #e6edf3; background: #30363d; }
+    #btn-settings.active { color: #58a6ff; }
+
+    /* ── Drone list ── */
+    #drone-list {
+      overflow-y: auto;
+      flex: 1;
+      padding: 8px;
+    }
+
+    .drone-card {
+      background: #21262d;
+      border: 1px solid #30363d;
+      border-radius: 8px;
+      padding: 10px 12px;
+      margin-bottom: 8px;
+      cursor: pointer;
+      transition: border-color 0.2s, background 0.2s;
+    }
+    .drone-card:hover  { border-color: #58a6ff; }
+    .drone-card.active { border-color: #f85149; background: #1c2a3a; }
+
+    .drone-card-header { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+    .drone-icon-sm { font-size: 18px; }
+    .drone-serial  { font-size: 11px; font-weight: 600; color: #58a6ff; word-break: break-all; }
+    .drone-model   { font-size: 12px; color: #8b949e; margin-bottom: 4px; }
+
+    .drone-stats {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 3px 8px;
+      font-size: 11px;
+    }
+    .stat-label { color: #8b949e; }
+    .stat-value { color: #e6edf3; font-weight: 500; }
+
+    .rssi-bar  { height: 3px; background: #30363d; border-radius: 2px; margin-top: 6px; overflow: hidden; }
+    .rssi-fill { height: 100%; border-radius: 2px; background: #3fb950; transition: width 0.4s; }
+
+    .no-drones { text-align: center; color: #8b949e; font-size: 13px; padding: 32px 16px; }
+    .no-drones .icon { font-size: 32px; margin-bottom: 8px; }
+
+    /* ── View toggle ── */
+    #view-toggle {
+      display: flex;
+      flex-shrink: 0;
+      border-bottom: 1px solid #30363d;
+    }
+    .view-tab {
+      flex: 1;
+      background: none;
+      border: none;
+      border-bottom: 2px solid transparent;
+      color: #8b949e;
+      cursor: pointer;
+      font-size: 12px;
+      font-weight: 600;
+      padding: 8px 0;
+      transition: color 0.2s, border-color 0.2s;
+    }
+    .view-tab:hover { color: #e6edf3; }
+    .view-tab.active { color: #58a6ff; border-bottom-color: #58a6ff; }
+
+    /* ── History list ── */
+    #history-list { overflow-y: auto; flex: 1; padding: 8px; display: none; }
+    .history-card.active { border-color: #f85149; }
+    .history-card {
+      background: #21262d;
+      border: 1px solid #30363d;
+      border-radius: 8px;
+      padding: 10px 12px;
+      margin-bottom: 8px;
+      font-size: 11px;
+    }
+    .history-card-header { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+    .history-serial { font-size: 11px; font-weight: 600; color: #58a6ff; word-break: break-all; }
+    .history-model  { font-size: 12px; color: #8b949e; margin-bottom: 6px; }
+    .history-last-seen { margin-left: auto; font-size: 10px; color: #6e7681; white-space: nowrap; }
+    .history-grid {
+      display: grid;
+      grid-template-columns: auto 1fr;
+      gap: 2px 10px;
+    }
+    .hk { color: #8b949e; }
+    .hv { color: #e6edf3; font-weight: 500; word-break: break-all; }
+
+    /* ── Settings panel ── */
+    #settings-panel {
+      display: none;
+      flex-direction: column;
+      flex: 1;
+      overflow-y: auto;
+      padding: 12px;
+      gap: 16px;
+    }
+    #settings-panel.open { display: flex; }
+
+    .cfg-section {
+      background: #21262d;
+      border: 1px solid #30363d;
+      border-radius: 8px;
+      overflow: hidden;
+    }
+
+    .cfg-section-title {
+      font-size: 10px;
+      font-weight: 600;
+      letter-spacing: 0.8px;
+      text-transform: uppercase;
+      color: #8b949e;
+      padding: 8px 12px;
+      background: #1c2128;
+      border-bottom: 1px solid #30363d;
+    }
+
+    .cfg-rows { padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; }
+
+    .cfg-row { display: flex; align-items: center; gap: 8px; }
+    .cfg-row label { font-size: 12px; color: #8b949e; width: 80px; flex-shrink: 0; }
+
+    .cfg-input {
+      flex: 1;
+      background: #0d1117;
+      border: 1px solid #30363d;
+      color: #e6edf3;
+      border-radius: 5px;
+      padding: 5px 8px;
+      font-size: 12px;
+      outline: none;
+      transition: border-color 0.2s;
+    }
+    .cfg-input:focus { border-color: #58a6ff; }
+
+    .cfg-select {
+      flex: 1;
+      background: #0d1117;
+      border: 1px solid #30363d;
+      color: #e6edf3;
+      border-radius: 5px;
+      padding: 5px 8px;
+      font-size: 12px;
+      outline: none;
+      cursor: pointer;
+      transition: border-color 0.2s;
+    }
+    .cfg-select:focus { border-color: #58a6ff; }
+
+    .cfg-btn {
+      background: #21262d;
+      border: 1px solid #30363d;
+      color: #e6edf3;
+      border-radius: 6px;
+      padding: 6px 12px;
+      font-size: 12px;
+      cursor: pointer;
+      transition: background 0.2s, border-color 0.2s;
+      white-space: nowrap;
+    }
+    .cfg-btn:hover  { background: #30363d; border-color: #58a6ff; }
+    .cfg-btn.active { background: #1c2a3a; border-color: #58a6ff; color: #58a6ff; }
+    .cfg-btn.danger:hover { border-color: #f85149; color: #f85149; }
+
+    /* full-width button row */
+    .cfg-btn-row { display: flex; gap: 6px; }
+    .cfg-btn-row .cfg-btn { flex: 1; }
+
+    #cfg-conn-status {
+      font-size: 11px;
+      padding: 4px 0 0;
+      min-height: 16px;
+      color: #8b949e;
+    }
+    #cfg-conn-status.err { color: #f85149; }
+
+    /* ── Toast ── */
+    #toast {
+      position: fixed;
+      bottom: 24px;
+      left: calc(320px + 16px);
+      background: #21262d;
+      border: 1px solid #30363d;
+      border-radius: 7px;
+      padding: 9px 14px;
+      font-size: 12px;
+      color: #e6edf3;
+      pointer-events: none;
+      opacity: 0;
+      z-index: 2000;
+    }
+    #toast.show {
+      animation: toast-anim 3s ease forwards;
+    }
+    #toast.ok  { border-color: #238636; color: #3fb950; }
+    #toast.err { border-color: #da3633; color: #f85149; }
+
+    @keyframes toast-anim {
+      0%   { opacity: 0; transform: translateY(6px); }
+      12%  { opacity: 1; transform: translateY(0);   }
+      70%  { opacity: 1; }
+      100% { opacity: 0; }
+    }
+
+    /* ── Sensor position footer ── */
+    #sensor-footer {
+      border-top: 1px solid #30363d;
+      background: #21262d;
+      padding: 10px 14px;
+      font-size: 11px;
+      flex-shrink: 0;
+    }
+    #sensor-footer .sf-label {
+      color: #8b949e;
+      font-size: 10px;
+      letter-spacing: 0.6px;
+      text-transform: uppercase;
+      margin-bottom: 6px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    #sensor-fix-badge {
+      font-size: 9px; padding: 1px 5px; border-radius: 3px;
+      background: #30363d; color: #8b949e; font-weight: 600; letter-spacing: 0.4px;
+    }
+    #sensor-fix-badge.fix2d { background: #3d2f00; color: #e3b341; }
+    #sensor-fix-badge.fix3d { background: #0d2d1b; color: #3fb950; }
+
+    #sensor-coords {
+      display: grid;
+      grid-template-columns: 32px 1fr;
+      gap: 2px 6px;
+      font-variant-numeric: tabular-nums;
+    }
+    #sensor-coords .sc-key { color: #8b949e; }
+    #sensor-coords .sc-val { font-weight: 500; }
+    #sensor-coords .sc-sep { grid-column: 1/-1; border-top: 1px solid #30363d; margin: 4px 0; }
+    #sensor-footer.no-fix { opacity: 0.45; }
+
+    /* ── Map ── */
+    #map { flex: 1; background: #0d1117; }
+
+    /* ── Leaflet overrides ── */
+    .leaflet-control-zoom a {
+      background: #21262d !important; color: #e6edf3 !important; border-color: #30363d !important;
+    }
+    .leaflet-control-zoom a:hover { background: #30363d !important; }
+
+    .leaflet-popup-content-wrapper {
+      background: #21262d; color: #e6edf3;
+      border: 1px solid #30363d; border-radius: 8px;
+      box-shadow: 0 4px 16px rgba(0,0,0,0.5);
+    }
+    .leaflet-popup-tip { background: #21262d; }
+    .leaflet-popup-content { margin: 10px 14px; font-size: 12px; }
+    .popup-title { font-size: 13px; font-weight: 600; color: #58a6ff; margin-bottom: 6px; }
+    .popup-row { display: flex; justify-content: space-between; gap: 12px; margin: 2px 0; }
+    .popup-key { color: #8b949e; }
+    .popup-val { color: #e6edf3; font-weight: 500; }
+  </style>
+</head>
+<body>
+
+<div id="sidebar">
+  <div id="sidebar-header">
+    <span id="status-dot"></span>
+    <h1><span id="header-sensor-name">Drone Detection</span> <span id="app-version" style="font-size:11px;font-weight:400;color:#8b949e"></span></h1>
+    <span id="drone-count">0 drones</span>
+    <button id="btn-settings" title="Settings">&#9881;</button>
+  </div>
+
+  <!-- View toggle -->
+  <div id="view-toggle">
+    <button class="view-tab active" id="tab-live">Live</button>
+    <button class="view-tab" id="tab-history">History</button>
+  </div>
+
+  <!-- Drone list (default view) -->
+  <div id="drone-list">
+    <div class="no-drones">
+      <div class="icon">📡</div>
+      Waiting for detections…
+    </div>
+  </div>
+
+  <!-- History list -->
+  <div id="history-list">
+    <div id="history-toolbar" style="display:none;padding:6px 8px;border-bottom:1px solid #30363d;flex-shrink:0">
+      <button class="cfg-btn" id="btn-show-all" style="width:100%">Show all on map</button>
+    </div>
+    <div id="history-cards">
+      <div class="no-drones"><div class="icon">📋</div>No history yet…</div>
+    </div>
+  </div>
+
+  <!-- Settings panel (hidden until gear clicked) -->
+  <div id="settings-panel">
+
+    <!-- Connection -->
+    <div class="cfg-section">
+      <div class="cfg-section-title">Connection</div>
+      <div class="cfg-rows">
+        <div class="cfg-row">
+          <label>Type</label>
+          <select id="cfg-conn-type" class="cfg-select">
+            <option value="tcp">TCP (listen)</option>
+            <option value="serial">Serial</option>
+          </select>
+        </div>
+        <div id="cfg-tcp-rows">
+          <div class="cfg-row">
+            <label>Bind address</label>
+            <input id="cfg-antsdr-host" class="cfg-input" type="text" placeholder="0.0.0.0" />
+          </div>
+          <div class="cfg-row">
+            <label>Listen port</label>
+            <input id="cfg-antsdr-port" class="cfg-input" type="number" placeholder="52002" min="1" max="65535" />
+          </div>
+        </div>
+        <div id="cfg-serial-rows" style="display:none">
+          <div class="cfg-row">
+            <label>Serial port</label>
+            <select id="cfg-serial-port" class="cfg-select" style="flex:1"></select>
+            <button class="cfg-btn" id="cfg-serial-refresh" style="margin-left:6px;padding:5px 8px" title="Refresh ports">↺</button>
+          </div>
+          <div class="cfg-row">
+            <label>Baud rate</label>
+            <input id="cfg-serial-baud" class="cfg-input" type="number" placeholder="115200" />
+          </div>
+        </div>
+        <div class="cfg-btn-row">
+          <button class="cfg-btn" id="cfg-apply">Apply &amp; reconnect</button>
+        </div>
+        <div id="cfg-conn-status"></div>
+      </div>
+    </div>
+
+    <!-- Sensor -->
+    <div class="cfg-section">
+      <div class="cfg-section-title">Sensor</div>
+      <div class="cfg-rows">
+        <div class="cfg-row">
+          <label>Name</label>
+          <input id="cfg-sensor-name" class="cfg-input" type="text" placeholder="Sensor" />
+        </div>
+        <div class="cfg-row">
+          <label>Icon</label>
+          <select id="cfg-sensor-icon" class="cfg-select">
+            <option value="📡">📡 Satellite dish</option>
+            <option value="🗼">🗼 Tower</option>
+            <option value="🚀">🚀 Rocket</option>
+          </select>
+        </div>
+        <div class="cfg-row">
+          <label>Location</label>
+          <select id="cfg-sensor-location-source" class="cfg-select">
+            <option value="gpsd">GPSD</option>
+            <option value="manual">Manual</option>
+          </select>
+        </div>
+        <div id="cfg-manual-location" style="display:none">
+          <div class="cfg-row">
+            <label>Latitude</label>
+            <input id="cfg-sensor-lat" class="cfg-input" type="number" step="any" placeholder="45.000000" />
+          </div>
+          <div class="cfg-row">
+            <label>Longitude</label>
+            <input id="cfg-sensor-lon" class="cfg-input" type="number" step="any" placeholder="-76.000000" />
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Map display -->
+    <div class="cfg-section">
+      <div class="cfg-section-title">Map display</div>
+      <div class="cfg-rows">
+        <div class="cfg-row">
+          <label>Style</label>
+          <select id="cfg-map-style" class="cfg-select">
+            <option value="osm">OSM Standard</option>
+            <option value="carto-dark">CartoDB Dark</option>
+            <option value="carto-light">CartoDB Light</option>
+            <option value="esri-satellite">Satellite (Esri)</option>
+            <option value="esri-topo">Topo (Esri)</option>
+            <option value="otm">OpenTopoMap</option>
+            <option value="google-hybrid">Google Hybrid</option>
+          </select>
+        </div>
+        <div class="cfg-btn-row">
+          <button class="cfg-btn active" id="btn-follow">Auto-fit</button>
+          <button class="cfg-btn" id="btn-track">Auto-track</button>
+        </div>
+        <div class="cfg-btn-row">
+          <button class="cfg-btn active" id="btn-lines">Lines: ON</button>
+          <button class="cfg-btn danger" id="btn-clear">Clear drones</button>
+        </div>
+        <div class="cfg-row">
+          <label>Tile cache</label>
+          <span id="tile-cache-size" style="font-size:12px;color:#8b949e;flex:1">—</span>
+          <button class="cfg-btn danger" id="btn-clear-tiles" style="flex:0;white-space:nowrap">Clear Map Cache</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Discord -->
+    <div class="cfg-section">
+      <div class="cfg-section-title">Discord</div>
+      <div class="cfg-rows">
+        <div class="cfg-row">
+          <label>Webhook URL</label>
+          <input id="cfg-discord-webhook" class="cfg-input" type="text" placeholder="https://discord.com/api/webhooks/…" />
+        </div>
+      </div>
+    </div>
+
+    <!-- TAK -->
+    <div class="cfg-section">
+      <div class="cfg-section-title">TAK Server</div>
+      <div class="cfg-rows">
+        <div class="cfg-row">
+          <label>Enabled</label>
+          <input id="cfg-tak-enabled" type="checkbox" />
+        </div>
+        <div class="cfg-row">
+          <label>Protocol</label>
+          <select id="cfg-tak-protocol" class="cfg-select">
+            <option value="udp">UDP</option>
+            <option value="tcp">TCP</option>
+          </select>
+        </div>
+        <div class="cfg-row">
+          <label>Host</label>
+          <input id="cfg-tak-host" class="cfg-input" type="text" placeholder="192.168.1.100" />
+        </div>
+        <div class="cfg-row">
+          <label>Port</label>
+          <input id="cfg-tak-port" class="cfg-input" type="number" placeholder="8087" min="1" max="65535" />
+        </div>
+      </div>
+    </div>
+
+    <!-- Save -->
+    <div class="cfg-section">
+      <div class="cfg-rows">
+        <div class="cfg-btn-row">
+          <button class="cfg-btn" id="cfg-save">Save settings</button>
+        </div>
+      </div>
+    </div>
+
+  </div><!-- /settings-panel -->
+
+  <!-- GPS footer always visible -->
+  <div id="sensor-footer" class="no-fix">
+    <div class="sf-label"><span id="sf-icon">📡</span> <span id="footer-sensor-name">Sensor</span> position <span id="sensor-fix-badge">NO FIX</span></div>
+    <div id="sensor-coords">
+      <span class="sc-key">Lat</span>  <span class="sc-val" id="sc-lat">—</span>
+      <span class="sc-key">Lon</span>  <span class="sc-val" id="sc-lon">—</span>
+      <span class="sc-key">Alt</span>  <span class="sc-val" id="sc-alt">—</span>
+      <span class="sc-sep"></span>
+      <span class="sc-key">Fix</span>  <span class="sc-val" id="sc-fix">—</span>
+      <span class="sc-key">Sats</span> <span class="sc-val" id="sc-sats">—</span>
+      <span class="sc-sep"></span>
+      <span class="sc-key">Time</span> <span class="sc-val" id="sc-time">—</span>
+      <span class="sc-key">Age</span>  <span class="sc-val" id="sc-age">—</span>
+    </div>
+  </div>
+</div>
+
+<div id="map"></div>
+<div id="toast"></div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+// ── Map setup ──────────────────────────────────────────────────────────────
+const map = L.map('map', { center: [20, 0], zoom: 3 });
+
+const MAP_STYLES = {
+  'osm':            { url: '/tiles/osm/{z}/{x}/{y}',
+                      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>', maxZoom: 19 },
+  'carto-dark':     { url: '/tiles/carto-dark/{z}/{x}/{y}',
+                      attribution: '&copy; OpenStreetMap &copy; <a href="https://carto.com/">CARTO</a>', maxZoom: 19 },
+  'carto-light':    { url: '/tiles/carto-light/{z}/{x}/{y}',
+                      attribution: '&copy; OpenStreetMap &copy; <a href="https://carto.com/">CARTO</a>', maxZoom: 19 },
+  'esri-satellite': { url: '/tiles/esri-satellite/{z}/{x}/{y}',
+                      attribution: '&copy; <a href="https://www.esri.com/">Esri</a>', maxZoom: 19 },
+  'esri-topo':      { url: '/tiles/esri-topo/{z}/{x}/{y}',
+                      attribution: '&copy; <a href="https://www.esri.com/">Esri</a>', maxZoom: 19 },
+  'otm':            { url: '/tiles/otm/{z}/{x}/{y}',
+                      attribution: '&copy; OpenStreetMap &copy; <a href="https://opentopomap.org/">OpenTopoMap</a>', maxZoom: 17 },
+  'google-hybrid':  { url: '/tiles/google-hybrid/{z}/{x}/{y}',
+                      attribution: '&copy; <a href="https://maps.google.com">Google Maps</a>', maxZoom: 20 },
+};
+
+let currentStyleKey  = 'osm';
+let currentTileLayer = L.tileLayer(MAP_STYLES.osm.url, MAP_STYLES.osm).addTo(map);
+
+function setMapStyle(key) {
+  const s = MAP_STYLES[key];
+  if (!s) return;
+  map.removeLayer(currentTileLayer);
+  currentTileLayer = L.tileLayer(s.url, s).addTo(map);
+  currentTileLayer.bringToBack();
+  currentStyleKey = key;
+  document.getElementById('cfg-map-style').value = key;
+}
+
+
+// ── Icons ──────────────────────────────────────────────────────────────────
+function makeIcon(emoji, size = 28) {
+  return L.divIcon({
+    html: `<div style="font-size:${size}px;line-height:1;filter:drop-shadow(0 1px 3px rgba(0,0,0,0.8))">${emoji}</div>`,
+    className: '', iconSize: [size, size],
+    iconAnchor: [size/2, size/2], popupAnchor: [0, -(size/2+4)],
+  });
+}
+const ICONS = {
+  drone:  makeIcon('🛸', 30),
+  pilot:  makeIcon('🧍', 24),
+  home:   makeIcon('🏠', 22),
+  sensor: makeIcon('📡', 26),
+};
+
+function setSensorName(name) {
+  const n = name || 'Sensor';
+  document.getElementById('cfg-sensor-name').value          = n;
+  document.getElementById('header-sensor-name').textContent = n;
+  document.getElementById('footer-sensor-name').textContent = n;
+  document.title = n + ' - DJI Drone Detector';
+}
+
+function setSensorIcon(emoji) {
+  document.getElementById('cfg-sensor-icon').value = emoji;
+  document.getElementById('sf-icon').textContent = emoji;
+  ICONS.sensor = makeIcon(emoji, 26);
+  if (sensorMarker) sensorMarker.setIcon(ICONS.sensor);
+}
+
+
+// ── State ──────────────────────────────────────────────────────────────────
+const drones = {};
+let sensorMarker   = null;
+let sensorCentered = false;
+let autoTrack  = false;
+let autoFit    = true;
+let showLines  = true;
+let _historyMarkers = [];
+
+function clearHistoryMarkers() {
+  _historyMarkers.forEach(m => m.remove());
+  _historyMarkers = [];
+}
+let activeDrone = null;
+
+
+// ── Utility ─────────────────────────────────────────────────────────────────
+function escHtml(s) {
+  return String(s ?? '')
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+// ── Popup builders ─────────────────────────────────────────────────────────
+function buildPopup(d) {
+  const freq = d.freq ? d.freq.toFixed(1)+' MHz' : 'N/A';
+  const alt  = d.geodetic_altitude ? d.geodetic_altitude.toFixed(1)+' m' : 'N/A';
+  const hagl = d.height_agl ? d.height_agl.toFixed(1)+' m' : 'N/A';
+  const spd  = d.horizontal_speed ? d.horizontal_speed.toFixed(1)+' m/s' : 'N/A';
+  const vspd = d.vertical_speed !== undefined ? d.vertical_speed.toFixed(1)+' m/s' : 'N/A';
+  return `<div class="popup-title">🛸 ${escHtml(d.serial_number)}</div>
+    <div class="popup-row"><span class="popup-key">Model</span><span class="popup-val">${escHtml(d.device_type||'Unknown')}</span></div>
+    <div class="popup-row"><span class="popup-key">Alt (MSL)</span><span class="popup-val">${alt}</span></div>
+    <div class="popup-row"><span class="popup-key">Height AGL</span><span class="popup-val">${hagl}</span></div>
+    <div class="popup-row"><span class="popup-key">H. Speed</span><span class="popup-val">${spd}</span></div>
+    <div class="popup-row"><span class="popup-key">V. Speed</span><span class="popup-val">${vspd}</span></div>
+    <div class="popup-row"><span class="popup-key">RSSI</span><span class="popup-val">${d.rssi} dBm</span></div>
+    <div class="popup-row"><span class="popup-key">Freq</span><span class="popup-val">${freq}</span></div>`;
+}
+
+function rssiPct(rssi) { return Math.max(0, Math.min(100, ((rssi+100)/70)*100)); }
+
+
+// ── Sidebar drone cards ────────────────────────────────────────────────────
+function renderSidebar() {
+  const list = document.getElementById('drone-list');
+  const serials = Object.keys(drones);
+  document.getElementById('drone-count').textContent =
+    serials.length + (serials.length === 1 ? ' drone' : ' drones');
+
+  if (serials.length === 0) {
+    list.innerHTML = '<div class="no-drones"><div class="icon">📡</div>Waiting for detections…</div>';
+    return;
+  }
+  list.innerHTML = '';
+  for (const serial of serials) {
+    const d = drones[serial].data;
+    const pct = rssiPct(d.rssi);
+    const card = document.createElement('div');
+    card.className = 'drone-card' + (activeDrone === serial ? ' active' : '');
+    card.innerHTML = `
+      <div class="drone-card-header">
+        <span class="drone-icon-sm">🛸</span>
+        <span class="drone-serial">${escHtml(serial)}</span>
+      </div>
+      <div class="drone-model">${escHtml(d.device_type||'Unknown model')}</div>
+      <div class="drone-stats">
+        <span class="stat-label">Alt</span>
+        <span class="stat-value">${d.geodetic_altitude ? d.geodetic_altitude.toFixed(1)+' m' : 'N/A'}</span>
+        <span class="stat-label">Speed</span>
+        <span class="stat-value">${d.horizontal_speed ? d.horizontal_speed.toFixed(1)+' m/s' : 'N/A'}</span>
+        <span class="stat-label">RSSI</span>
+        <span class="stat-value">${d.rssi} dBm</span>
+        <span class="stat-label">Freq</span>
+        <span class="stat-value">${d.freq ? d.freq.toFixed(1)+' MHz' : 'N/A'}</span>
+      </div>
+      <div class="rssi-bar"><div class="rssi-fill" style="width:${pct}%"></div></div>`;
+    card.addEventListener('click', () => {
+      activeDrone = serial;
+      renderSidebar();
+      const e = drones[serial];
+      if (e?.droneMarker) { map.setView(e.droneMarker.getLatLng(), Math.max(map.getZoom(), 16)); e.droneMarker.openPopup(); }
+    });
+    list.appendChild(card);
+  }
+}
+
+
+// ── Map helpers ────────────────────────────────────────────────────────────
+function validCoord(lat, lon) {
+  return lat !== 0 && lon !== 0 && lat >= -90 && lat <= 90 && lon >= -180 && lon <= 180;
+}
+
+function fitAll() {
+  const pts = [];
+  for (const e of Object.values(drones)) {
+    if (e.droneMarker) pts.push(e.droneMarker.getLatLng());
+    if (e.pilotMarker) pts.push(e.pilotMarker.getLatLng());
+    if (e.homeMarker)  pts.push(e.homeMarker.getLatLng());
+  }
+  if (pts.length) map.fitBounds(L.latLngBounds(pts), { padding: [40,40], maxZoom: 18 });
+}
+
+function updateLinesVisibility() {
+  for (const e of Object.values(drones))
+    for (const ln of (e.lines||[]))
+      showLines ? ln.addTo(map) : map.removeLayer(ln);
+}
+
+
+// ── Drone upsert / remove ──────────────────────────────────────────────────
+function upsertDrone(d) {
+  const serial = d.serial_number;
+  if (!drones[serial]) drones[serial] = { data: d, droneMarker: null, pilotMarker: null, homeMarker: null, lines: [] };
+  const e = drones[serial];
+  e.data = d;
+
+  if (validCoord(d.drone_lat, d.drone_lon)) {
+    const ll = [d.drone_lat, d.drone_lon];
+    if (!e.droneMarker) e.droneMarker = L.marker(ll, { icon: ICONS.drone, zIndexOffset: 200 }).addTo(map).bindPopup('');
+    else e.droneMarker.setLatLng(ll);
+    e.droneMarker.getPopup().setContent(buildPopup(d));
+  }
+
+  if (validCoord(d.pilot_lat, d.pilot_lon)) {
+    const ll = [d.pilot_lat, d.pilot_lon];
+    if (!e.pilotMarker) e.pilotMarker = L.marker(ll, { icon: ICONS.pilot, zIndexOffset: 100 }).addTo(map)
+      .bindPopup(`<div class="popup-title">🧍 Pilot</div>
+        <div class="popup-row"><span class="popup-key">Drone</span><span class="popup-val">${escHtml(serial)}</span></div>
+        <div class="popup-row"><span class="popup-key">Lat</span><span class="popup-val">${d.pilot_lat.toFixed(6)}</span></div>
+        <div class="popup-row"><span class="popup-key">Lon</span><span class="popup-val">${d.pilot_lon.toFixed(6)}</span></div>`);
+    else e.pilotMarker.setLatLng(ll);
+  }
+
+  if (validCoord(d.home_lat, d.home_lon)) {
+    const ll = [d.home_lat, d.home_lon];
+    if (!e.homeMarker) e.homeMarker = L.marker(ll, { icon: ICONS.home, zIndexOffset: 50 }).addTo(map)
+      .bindPopup(`<div class="popup-title">🏠 Home / Takeoff</div>
+        <div class="popup-row"><span class="popup-key">Drone</span><span class="popup-val">${escHtml(serial)}</span></div>
+        <div class="popup-row"><span class="popup-key">Lat</span><span class="popup-val">${d.home_lat.toFixed(6)}</span></div>
+        <div class="popup-row"><span class="popup-key">Lon</span><span class="popup-val">${d.home_lon.toFixed(6)}</span></div>`);
+    else e.homeMarker.setLatLng(ll);
+  }
+
+  for (const ln of e.lines) map.removeLayer(ln);
+  e.lines = [];
+  if (e.droneMarker) {
+    const dll = e.droneMarker.getLatLng();
+    if (e.pilotMarker) e.lines.push(L.polyline([dll, e.pilotMarker.getLatLng()], { color:'#f0883e', weight:1.5, dashArray:'6 4', opacity:0.7 }));
+    if (e.homeMarker)  e.lines.push(L.polyline([dll, e.homeMarker.getLatLng()],  { color:'#3fb950', weight:1.5, dashArray:'4 4', opacity:0.6 }));
+  }
+  if (showLines) for (const ln of e.lines) ln.addTo(map);
+
+  renderSidebar();
+  if (autoFit) fitAll();
+}
+
+function removeDrone(serial) {
+  const e = drones[serial];
+  if (!e) return;
+  for (const layer of [e.droneMarker, e.pilotMarker, e.homeMarker]) if (layer) map.removeLayer(layer);
+  for (const ln of e.lines) map.removeLayer(ln);
+  delete drones[serial];
+  if (activeDrone === serial) activeDrone = null;
+  renderSidebar();
+}
+
+
+// ── Sensor ─────────────────────────────────────────────────────────────────
+let lastFixWallTime = 0;
+
+function fmtAge(t) {
+  if (!t) return '—';
+  const s = Math.round(Date.now()/1000 - t);
+  if (s < 60)   return s + 's ago';
+  if (s < 3600) return Math.floor(s/60) + 'm ' + (s%60) + 's ago';
+  return Math.floor(s/3600) + 'h ago';
+}
+
+function fmtGpsTime(t) {
+  if (!t) return '—';
+  try { return new Date(t).toUTCString().replace('GMT','UTC'); } catch { return t; }
+}
+
+function upsertSensor(pos) {
+  const hasfix   = pos.mode >= 2;
+  const altStr   = pos.alt != null ? pos.alt.toFixed(1)+' m' : 'N/A';
+  const fixLabel = pos.mode === 3 ? '3D' : pos.mode === 2 ? '2D' : 'No fix';
+  const satsStr  = `${pos.sats_used??'?'} used / ${pos.sats_visible??'?'} visible`;
+
+  if (pos.last_fix_wall_time) lastFixWallTime = pos.last_fix_wall_time;
+
+  if (hasfix && pos.lat != null && pos.lon != null) {
+    const ll = [pos.lat, pos.lon];
+    const popup = `<div class="popup-title">🗼 Sensor</div>
+      <div class="popup-row"><span class="popup-key">Lat</span><span class="popup-val">${pos.lat.toFixed(6)}</span></div>
+      <div class="popup-row"><span class="popup-key">Lon</span><span class="popup-val">${pos.lon.toFixed(6)}</span></div>
+      <div class="popup-row"><span class="popup-key">Alt</span><span class="popup-val">${altStr}</span></div>
+      <div class="popup-row"><span class="popup-key">Fix</span><span class="popup-val">${fixLabel}</span></div>
+      <div class="popup-row"><span class="popup-key">Sats</span><span class="popup-val">${satsStr}</span></div>`;
+    if (!sensorMarker) sensorMarker = L.marker(ll, { icon: ICONS.sensor, zIndexOffset: 300 }).addTo(map).bindPopup(popup);
+    else { sensorMarker.setLatLng(ll); sensorMarker.getPopup().setContent(popup); }
+
+    if (!sensorCentered) { map.setView(ll, 15); sensorCentered = true; }
+    else if (autoTrack)  { map.setView(ll, map.getZoom()); }
+  }
+
+  const footer = document.getElementById('sensor-footer');
+  const badge  = document.getElementById('sensor-fix-badge');
+  footer.classList.toggle('no-fix', !hasfix);
+  badge.textContent = fixLabel;
+  badge.className   = pos.mode === 3 ? 'fix3d' : pos.mode === 2 ? 'fix2d' : '';
+
+  document.getElementById('sc-lat').textContent  = (pos.lat  != null && pos.lat  !== 0) ? pos.lat.toFixed(6)  : '—';
+  document.getElementById('sc-lon').textContent  = (pos.lon  != null && pos.lon  !== 0) ? pos.lon.toFixed(6)  : '—';
+  document.getElementById('sc-alt').textContent  = altStr;
+  document.getElementById('sc-fix').textContent  = fixLabel;
+  document.getElementById('sc-sats').textContent = satsStr;
+  document.getElementById('sc-time').textContent = fmtGpsTime(pos.gps_time);
+  document.getElementById('sc-age').textContent  = fmtAge(lastFixWallTime);
+}
+
+setInterval(() => { if (lastFixWallTime) document.getElementById('sc-age').textContent = fmtAge(lastFixWallTime); }, 1000);
+
+
+// ── SSE ────────────────────────────────────────────────────────────────────
+const dot = document.getElementById('status-dot');
+let es;
+
+function connect() {
+  es = new EventSource('/stream');
+  es.onmessage = (e) => {
+    const msg = JSON.parse(e.data);
+    if      (msg.type === 'update')         upsertDrone(msg.drone);
+    else if (msg.type === 'remove')         removeDrone(msg.serial);
+    else if (msg.type === 'sensor')         upsertSensor(msg.position);
+    else if (msg.type === 'antsdr_status')  dot.classList.toggle('connected', msg.connected);
+  };
+  es.onerror = () => { es.close(); setTimeout(connect, 3000); };
+}
+connect();
+loadConfig();  // apply persisted settings immediately on page load
+
+
+// ── Settings panel toggle ──────────────────────────────────────────────────
+const btnSettings    = document.getElementById('btn-settings');
+const droneList      = document.getElementById('drone-list');
+const settingsPanel  = document.getElementById('settings-panel');
+
+const viewToggleEl = document.getElementById('view-toggle');
+
+btnSettings.addEventListener('click', () => {
+  const open = settingsPanel.classList.toggle('open');
+  viewToggleEl.style.display = open ? 'none' : '';
+  if (!open) {
+    // restore whichever tab is active
+    droneListEl.style.display   = tabLive.classList.contains('active')    ? ''      : 'none';
+    historyListEl.style.display = tabHistory.classList.contains('active') ? 'block' : 'none';
+  } else {
+    droneListEl.style.display   = 'none';
+    historyListEl.style.display = 'none';
+  }
+  btnSettings.classList.toggle('active', open);
+  if (open) { loadConfig(); refreshTileCacheSize(); }
+});
+
+
+// ── Load config from server ────────────────────────────────────────────────
+function loadConfig() {
+  fetch('/config')
+    .then(r => r.json())
+    .then(cfg => {
+      document.getElementById('cfg-antsdr-host').value     = cfg.antsdr_host  || '';
+      document.getElementById('cfg-antsdr-port').value     = cfg.antsdr_port  || '';
+      document.getElementById('cfg-conn-type').value       = cfg.connection_type || 'tcp';
+      document.getElementById('cfg-serial-baud').value     = cfg.serial_baud  || '';
+      document.getElementById('cfg-discord-webhook').value = cfg.discord_webhook || '';
+      document.getElementById('cfg-tak-enabled').checked   = !!cfg.tak_enabled;
+      document.getElementById('cfg-tak-protocol').value    = cfg.tak_protocol || 'udp';
+      document.getElementById('cfg-tak-host').value        = cfg.tak_host || '';
+      document.getElementById('cfg-tak-port').value        = cfg.tak_port || '';
+      toggleConnType(cfg.connection_type || 'tcp', cfg.serial_port || '');
+
+      if (cfg.version)     document.getElementById('app-version').textContent = 'v' + cfg.version;
+      if (cfg.map_style)   setMapStyle(cfg.map_style);
+      if (cfg.sensor_icon) setSensorIcon(cfg.sensor_icon);
+      if (cfg.sensor_name !== undefined) setSensorName(cfg.sensor_name);
+      if (cfg.sensor_location_source) {
+        document.getElementById('cfg-sensor-location-source').value = cfg.sensor_location_source;
+        document.getElementById('cfg-manual-location').style.display = cfg.sensor_location_source === 'manual' ? '' : 'none';
+      }
+      if (cfg.sensor_lat) document.getElementById('cfg-sensor-lat').value = cfg.sensor_lat;
+      if (cfg.sensor_lon) document.getElementById('cfg-sensor-lon').value = cfg.sensor_lon;
+
+      autoFit   = !!cfg.auto_fit;
+      autoTrack = !!cfg.auto_track;
+      showLines = !!cfg.show_lines;
+
+      document.getElementById('btn-follow').classList.toggle('active', autoFit);
+      document.getElementById('btn-track').classList.toggle('active', autoTrack);
+      document.getElementById('btn-lines').classList.toggle('active', showLines);
+      document.getElementById('btn-lines').textContent = 'Lines: ' + (showLines ? 'ON' : 'OFF');
+      updateLinesVisibility();
+    })
+    .catch(() => {});
+}
+
+
+// ── Connection config helpers ──────────────────────────────────────────────
+let toastTimer = null;
+function showToast(msg, type = 'ok') {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.className = type;           // clear 'show' first so re-trigger works
+  void t.offsetWidth;           // force reflow
+  t.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { t.className = ''; }, 3000);
+}
+
+function loadSerialPorts(selectPort) {
+  const sel = document.getElementById('cfg-serial-port');
+  sel.innerHTML = '<option value="">Scanning…</option>';
+  fetch('/serial-ports')
+    .then(r => r.json())
+    .then(({ports, error}) => {
+      sel.innerHTML = '';
+      if (error) { sel.innerHTML = `<option value="">${error}</option>`; return; }
+      if (!ports.length) { sel.innerHTML = '<option value="">No ports found</option>'; return; }
+      ports.forEach(p => {
+        const opt = document.createElement('option');
+        opt.value = p.port;
+        opt.textContent = (p.desc && p.desc !== p.port && p.desc !== 'n/a')
+          ? `${p.port} — ${p.desc}` : p.port;
+        sel.appendChild(opt);
+      });
+      if (selectPort) sel.value = selectPort;
+    })
+    .catch(() => { sel.innerHTML = '<option value="">Scan failed</option>'; });
+}
+
+function toggleConnType(type, selectPort) {
+  document.getElementById('cfg-tcp-rows').style.display    = type === 'tcp'    ? '' : 'none';
+  document.getElementById('cfg-serial-rows').style.display = type === 'serial' ? '' : 'none';
+  if (type === 'serial') loadSerialPorts(selectPort || document.getElementById('cfg-serial-port').value);
+}
+document.getElementById('cfg-conn-type').addEventListener('change', function() { toggleConnType(this.value); });
+document.getElementById('cfg-sensor-icon').addEventListener('change', function() { setSensorIcon(this.value); });
+document.getElementById('cfg-sensor-location-source').addEventListener('change', function() {
+  document.getElementById('cfg-manual-location').style.display = this.value === 'manual' ? '' : 'none';
+});
+document.getElementById('cfg-serial-refresh').addEventListener('click', () => loadSerialPorts(document.getElementById('cfg-serial-port').value));
+
+function postConfig(reconnect) {
+  const connType  = document.getElementById('cfg-conn-type').value;
+  const status    = document.getElementById('cfg-conn-status');
+
+  const payload = {
+    connection_type:  connType,
+    map_style:        currentStyleKey,
+    auto_fit:         autoFit,
+    auto_track:       autoTrack,
+    show_lines:       showLines,
+    sensor_icon:             document.getElementById('cfg-sensor-icon').value,
+    sensor_name:             document.getElementById('cfg-sensor-name').value.trim() || 'Sensor',
+    sensor_location_source:  document.getElementById('cfg-sensor-location-source').value,
+    sensor_lat:              parseFloat(document.getElementById('cfg-sensor-lat').value) || 0,
+    sensor_lon:              parseFloat(document.getElementById('cfg-sensor-lon').value) || 0,
+    discord_webhook:  document.getElementById('cfg-discord-webhook').value.trim(),
+    tak_enabled:      document.getElementById('cfg-tak-enabled').checked,
+    tak_protocol:     document.getElementById('cfg-tak-protocol').value,
+    tak_host:         document.getElementById('cfg-tak-host').value.trim(),
+    tak_port:         parseInt(document.getElementById('cfg-tak-port').value, 10) || 8087,
+    reconnect,
+  };
+
+  if (connType === 'tcp') {
+    const host = document.getElementById('cfg-antsdr-host').value.trim();
+    const port = parseInt(document.getElementById('cfg-antsdr-port').value, 10);
+    if (!host || !port || port < 1 || port > 65535) {
+      showToast('Invalid bind address or port.', 'err'); return;
+    }
+    payload.antsdr_host = host;
+    payload.antsdr_port = port;
+  } else {
+    const sp = document.getElementById('cfg-serial-port').value.trim();
+    const sb = parseInt(document.getElementById('cfg-serial-baud').value, 10);
+    if (!sp) { showToast('Select a serial port first.', 'err'); return; }
+    payload.serial_port = sp;
+    payload.serial_baud = sb || 115200;
+  }
+
+  status.textContent = reconnect ? 'Applying…' : 'Saving…';
+  status.className = '';
+
+  fetch('/config', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  .then(r => r.json())
+  .then(r => {
+    status.textContent = '';
+    if (!r.ok) { showToast('Save error: ' + (r.error || 'unknown'), 'err'); return; }
+    const label = connType === 'serial'
+      ? `Serial ${payload.serial_port}`
+      : `TCP ${payload.antsdr_host}:${payload.antsdr_port}`;
+    showToast(reconnect ? `Connecting via ${label}` : 'Settings saved.', 'ok');
+  })
+  .catch(() => { status.textContent = ''; showToast('Request failed.', 'err'); });
+}
+
+document.getElementById('cfg-save').addEventListener('click',  () => postConfig(false));
+document.getElementById('cfg-apply').addEventListener('click', () => postConfig(true));
+
+
+// ── Map style ──────────────────────────────────────────────────────────────
+document.getElementById('cfg-map-style').addEventListener('change', function () {
+  setMapStyle(this.value);
+  fetch('/map-cache', { method: 'POST' })
+    .then(() => refreshTileCacheSize())
+    .catch(() => {});
+});
+
+
+// ── Map control buttons ────────────────────────────────────────────────────
+document.getElementById('btn-follow').addEventListener('click', function () {
+  autoFit = !autoFit;
+  this.classList.toggle('active', autoFit);
+  if (autoFit) fitAll();
+});
+
+document.getElementById('btn-track').addEventListener('click', function () {
+  autoTrack = !autoTrack;
+  this.classList.toggle('active', autoTrack);
+});
+
+document.getElementById('btn-lines').addEventListener('click', function () {
+  showLines = !showLines;
+  this.textContent = 'Lines: ' + (showLines ? 'ON' : 'OFF');
+  this.classList.toggle('active', showLines);
+  updateLinesVisibility();
+});
+
+document.getElementById('btn-clear').addEventListener('click', () => {
+  for (const s of Object.keys(drones)) removeDrone(s);
+});
+
+// ── View toggle ────────────────────────────────────────────────────────────
+const droneListEl   = document.getElementById('drone-list');
+const historyListEl = document.getElementById('history-list');
+const tabLive       = document.getElementById('tab-live');
+const tabHistory    = document.getElementById('tab-history');
+
+tabLive.addEventListener('click', () => {
+  tabLive.classList.add('active');
+  tabHistory.classList.remove('active');
+  droneListEl.style.display   = '';
+  historyListEl.style.display = 'none';
+  clearHistoryMarkers();
+});
+
+tabHistory.addEventListener('click', () => {
+  tabHistory.classList.add('active');
+  tabLive.classList.remove('active');
+  droneListEl.style.display   = 'none';
+  historyListEl.style.display = 'block';
+  loadHistory();
+});
+
+function fmtLatLon(lat, lon) {
+  if (!lat && !lon) return null;
+  return lat.toFixed(6) + ', ' + lon.toFixed(6);
+}
+
+function fmtTimestamp(ts) {
+  if (!ts) return '—';
+  const d = new Date(ts * 1000);
+  return d.toLocaleDateString() + ' ' + d.toLocaleTimeString();
+}
+
+const historyCardsEl  = document.getElementById('history-cards');
+const historyToolbar  = document.getElementById('history-toolbar');
+let _historyEntries   = [];  // cached for show-all
+
+function placeHistoryMarker(d, openPopup) {
+  const freq = d.freq ? d.freq.toFixed(1)+' MHz' : 'N/A';
+  const m = L.marker([d.drone_lat, d.drone_lon], { icon: ICONS.drone })
+    .addTo(map)
+    .bindPopup(`<div class="popup-title">🛸 ${escHtml(d.serial_number)}</div>
+      <div class="popup-row"><span class="popup-key">Model</span><span class="popup-val">${escHtml(d.device_type||'Unknown')}</span></div>
+      <div class="popup-row"><span class="popup-key">Last seen</span><span class="popup-val">${fmtTimestamp(d.last_seen)}</span></div>
+      <div class="popup-row"><span class="popup-key">Alt (MSL)</span><span class="popup-val">${d.geodetic_altitude ? d.geodetic_altitude.toFixed(1)+' m' : 'N/A'}</span></div>
+      <div class="popup-row"><span class="popup-key">RSSI</span><span class="popup-val">${d.rssi} dBm</span></div>
+      <div class="popup-row"><span class="popup-key">Freq</span><span class="popup-val">${freq}</span></div>`);
+  if (openPopup) m.openPopup();
+  _historyMarkers.push(m);
+  return m;
+}
+
+function loadHistory() {
+  fetch('/history')
+    .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+    .then(data => {
+      _historyEntries = Object.values(data).filter(d => !drones[d.serial_number]);
+      if (!_historyEntries.length) {
+        historyCardsEl.innerHTML = '<div class="no-drones"><div class="icon">📋</div>No history yet…</div>';
+        historyToolbar.style.display = 'none';
+        return;
+      }
+      _historyEntries.sort((a, b) => (b.last_seen || 0) - (a.last_seen || 0));
+      historyToolbar.style.display = '';
+      historyCardsEl.innerHTML = '';
+      for (const d of _historyEntries) {
+        const droneCoords = fmtLatLon(d.drone_lat, d.drone_lon);
+        const pilotCoords = fmtLatLon(d.pilot_lat, d.pilot_lon);
+        const homeCoords  = fmtLatLon(d.home_lat,  d.home_lon);
+        const rows = [
+          ['Drone pos',   droneCoords || '—'],
+          pilotCoords ? ['Pilot pos', pilotCoords] : null,
+          homeCoords  ? ['Home pos',  homeCoords]  : null,
+          ['Alt (MSL)',   d.geodetic_altitude ? d.geodetic_altitude.toFixed(1)+' m' : '—'],
+          ['Height AGL',  d.height_agl        ? d.height_agl.toFixed(1)+' m'        : '—'],
+          ['H. Speed',    d.horizontal_speed  ? d.horizontal_speed.toFixed(1)+' m/s': '—'],
+          ['V. Speed',    d.vertical_speed !== undefined ? d.vertical_speed.toFixed(1)+' m/s' : '—'],
+          ['RSSI',        d.rssi !== undefined ? d.rssi+' dBm' : '—'],
+          ['Freq',        d.freq ? d.freq.toFixed(1)+' MHz' : '—'],
+        ].filter(Boolean);
+
+        const gridHtml = rows.map(([k, v]) =>
+          `<span class="hk">${k}</span><span class="hv">${v}</span>`
+        ).join('');
+
+        const card = document.createElement('div');
+        card.className = 'history-card';
+        card.style.cursor = 'pointer';
+        card.innerHTML = `
+          <div class="history-card-header">
+            <span class="drone-icon-sm">🛸</span>
+            <span class="history-serial">${escHtml(d.serial_number)}</span>
+            <span class="history-last-seen">${fmtTimestamp(d.last_seen)}</span>
+          </div>
+          <div class="history-model">${escHtml(d.device_type || 'Unknown model')}</div>
+          <div class="history-grid">${gridHtml}</div>`;
+        if (d.drone_lat && d.drone_lon) {
+          card.addEventListener('click', () => {
+            historyCardsEl.querySelectorAll('.history-card').forEach(c => c.classList.remove('active'));
+            card.classList.add('active');
+            clearHistoryMarkers();
+            placeHistoryMarker(d, true);
+            if (d.pilot_lat && d.pilot_lon)
+              _historyMarkers.push(L.marker([d.pilot_lat, d.pilot_lon], { icon: ICONS.pilot }).addTo(map));
+            if (d.home_lat && d.home_lon)
+              _historyMarkers.push(L.marker([d.home_lat, d.home_lon], { icon: ICONS.home }).addTo(map));
+            map.setView([d.drone_lat, d.drone_lon], Math.max(map.getZoom(), 16));
+          });
+        }
+        historyCardsEl.appendChild(card);
+      }
+    })
+    .catch(e => {
+      console.error('[History] load failed:', e);
+      historyCardsEl.innerHTML = `<div class="no-drones"><div class="icon">⚠️</div>Failed to load history<br><small style="color:#6e7681">${e.message}</small></div>`;
+      historyToolbar.style.display = 'none';
+    });
+}
+
+document.getElementById('btn-show-all').addEventListener('click', () => {
+  historyCardsEl.querySelectorAll('.history-card').forEach(c => c.classList.remove('active'));
+  clearHistoryMarkers();
+  const pts = [];
+  for (const d of _historyEntries) {
+    if (!d.drone_lat || !d.drone_lon) continue;
+    placeHistoryMarker(d, false);
+    pts.push([d.drone_lat, d.drone_lon]);
+  }
+  if (pts.length === 1) {
+    map.setView(pts[0], Math.max(map.getZoom(), 16));
+  } else if (pts.length > 1) {
+    map.fitBounds(L.latLngBounds(pts), { padding: [40, 40], maxZoom: 18 });
+  }
+});
+
+function formatBytes(b) {
+  if (b < 1024) return b + ' B';
+  if (b < 1024 * 1024) return (b / 1024).toFixed(1) + ' KB';
+  return (b / (1024 * 1024)).toFixed(1) + ' MB';
+}
+
+function refreshTileCacheSize() {
+  fetch('/map-cache')
+    .then(r => r.json())
+    .then(d => { document.getElementById('tile-cache-size').textContent = formatBytes(d.bytes); })
+    .catch(() => {});
+}
+
+let _tileCacheRefreshTimer = null;
+map.on('moveend', () => {
+  clearTimeout(_tileCacheRefreshTimer);
+  _tileCacheRefreshTimer = setTimeout(refreshTileCacheSize, 1500);
+});
+
+document.getElementById('btn-clear-tiles').addEventListener('click', () => {
+  fetch('/map-cache', { method: 'POST' })
+    .then(() => { refreshTileCacheSize(); showToast('Tile cache cleared.'); })
+    .catch(() => showToast('Clear failed.', 'err'));
+});
+</script>
+</body>
+</html>
