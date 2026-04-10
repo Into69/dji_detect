@@ -8,12 +8,17 @@
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
 
+    html {
+      height: 100%;
+      overflow: hidden;
+    }
+
     body {
       font-family: 'Segoe UI', system-ui, sans-serif;
       background: #0d1117;
       color: #e6edf3;
       display: flex;
-      height: 100vh;
+      height: 100dvh;
       overflow: hidden;
     }
 
@@ -26,6 +31,8 @@
       display: flex;
       flex-direction: column;
       z-index: 1000;
+      min-height: 0;
+      overflow: hidden;
     }
 
     #sidebar-header {
@@ -51,24 +58,12 @@
 
     #drone-count { margin-left: auto; font-size: 11px; color: #8b949e; }
 
-    #btn-settings {
-      background: none;
-      border: none;
-      color: #8b949e;
-      cursor: pointer;
-      font-size: 16px;
-      padding: 2px 4px;
-      border-radius: 4px;
-      transition: color 0.2s, background 0.2s;
-      line-height: 1;
-    }
-    #btn-settings:hover { color: #e6edf3; background: #30363d; }
-    #btn-settings.active { color: #58a6ff; }
 
     /* ── Drone list ── */
     #drone-list {
       overflow-y: auto;
       flex: 1;
+      min-height: 0;
       padding: 8px;
     }
 
@@ -126,7 +121,7 @@
     .view-tab.active { color: #58a6ff; border-bottom-color: #58a6ff; }
 
     /* ── History list ── */
-    #history-list { overflow-y: auto; flex: 1; padding: 8px; display: none; }
+    #history-list { overflow-y: auto; flex: 1; min-height: 0; padding: 8px; display: none; }
     .history-card.active { border-color: #f85149; }
     .history-card {
       background: #21262d;
@@ -153,17 +148,59 @@
       display: none;
       flex-direction: column;
       flex: 1;
+      min-height: 0;
+      overflow: hidden;
+    }
+
+    #cfg-tabs {
+      display: flex;
+      flex-shrink: 0;
+      border-bottom: 1px solid #30363d;
+      overflow-x: auto;
+      background: #161b22;
+    }
+    #cfg-tabs::-webkit-scrollbar { height: 4px; }
+    #cfg-tabs::-webkit-scrollbar-track { background: transparent; }
+    #cfg-tabs::-webkit-scrollbar-thumb { background: #30363d; border-radius: 2px; }
+    #cfg-tabs::-webkit-scrollbar-thumb:hover { background: #484f58; }
+    #cfg-tabs { scrollbar-width: thin; scrollbar-color: #30363d transparent; }
+    .cfg-tab {
+      background: none;
+      border: none;
+      border-bottom: 2px solid transparent;
+      color: #8b949e;
+      cursor: pointer;
+      font-size: 11px;
+      font-weight: 600;
+      padding: 8px 12px;
+      white-space: nowrap;
+      transition: color 0.2s, border-color 0.2s;
+    }
+    .cfg-tab:hover { color: #e6edf3; }
+    .cfg-tab.active { color: #58a6ff; border-bottom-color: #58a6ff; }
+
+    .cfg-tab-content {
+      flex: 1;
       overflow-y: auto;
       padding: 12px;
-      gap: 16px;
     }
-    #settings-panel.open { display: flex; }
+    .cfg-tab-pane { display: none; flex-direction: column; gap: 16px; }
+    .cfg-tab-pane.active { display: flex; }
+
+    .cfg-tab-footer {
+      flex-shrink: 0;
+      padding: 8px 12px;
+      border-top: 1px solid #30363d;
+      background: #161b22;
+    }
+    .cfg-tab-footer .cfg-btn { width: 100%; }
 
     .cfg-section {
       background: #21262d;
       border: 1px solid #30363d;
       border-radius: 8px;
       overflow: hidden;
+      flex-shrink: 0;
     }
 
     .cfg-section-title {
@@ -236,6 +273,33 @@
     }
     #cfg-conn-status.err { color: #f85149; }
 
+    /* ── Update file list ── */
+    .update-file-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 5px 10px;
+      font-size: 11px;
+      border-bottom: 1px solid #21262d;
+    }
+    .update-file-row:last-child { border-bottom: none; }
+    .update-file-badge {
+      font-size: 10px;
+      font-weight: 600;
+      padding: 1px 6px;
+      border-radius: 4px;
+      text-transform: uppercase;
+      flex-shrink: 0;
+    }
+    .update-file-badge.added    { background: #23352e; color: #3fb950; }
+    .update-file-badge.modified { background: #2a2316; color: #d29922; }
+    .update-file-badge.deleted  { background: #3d1a1e; color: #f85149; }
+    .update-file-badge.renamed  { background: #1c2a3a; color: #58a6ff; }
+    .update-file-name { color: #e6edf3; word-break: break-all; }
+
+    .cfg-btn.success       { border-color: #3fb950; color: #3fb950; background: #1a2e1a; }
+    .cfg-btn.success:hover { background: #23352e; }
+
     /* ── Toast ── */
     #toast {
       position: fixed;
@@ -264,6 +328,24 @@
       100% { opacity: 0; }
     }
 
+    /* ── Range ring labels ── */
+    .range-ring-label {
+      background: transparent;
+      border: none;
+      pointer-events: none;
+      text-align: center;
+    }
+    .range-ring-label span {
+      display: inline-block;
+      padding: 1px 4px;
+      background: rgba(13,17,23,0.75);
+      color: #3fb950;
+      font: 10px/1 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      border: 1px solid #3fb950;
+      border-radius: 2px;
+      white-space: nowrap;
+    }
+
     /* ── Sensor position footer ── */
     #sensor-footer {
       border-top: 1px solid #30363d;
@@ -281,7 +363,20 @@
       display: flex;
       align-items: center;
       gap: 6px;
+      cursor: pointer;
+      user-select: none;
     }
+    #sensor-footer .sf-label:hover { color: #e6edf3; }
+    #sf-toggle {
+      font-size: 10px;
+      margin-left: auto;
+      color: #8b949e;
+      line-height: 1;
+      transition: transform 0.2s;
+    }
+    #sensor-footer.collapsed #sensor-coords { display: none; }
+    #sensor-footer.collapsed .sf-label { margin-bottom: 0; }
+    #sensor-footer.collapsed #sf-toggle { transform: rotate(180deg); }
     #sensor-fix-badge {
       font-size: 9px; padding: 1px 5px; border-radius: 3px;
       background: #30363d; color: #8b949e; font-weight: 600; letter-spacing: 0.4px;
@@ -299,6 +394,59 @@
     #sensor-coords .sc-val { font-weight: 500; }
     #sensor-coords .sc-sep { grid-column: 1/-1; border-top: 1px solid #30363d; margin: 4px 0; }
     #sensor-footer.no-fix { opacity: 0.45; }
+
+    /* ── Error panel ── */
+    #error-panel {
+      border-top: 1px solid #30363d;
+      background: #161b22;
+      flex-shrink: 0;
+    }
+    #error-panel-header {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 14px;
+      cursor: pointer;
+      user-select: none;
+      font-size: 11px;
+      color: #8b949e;
+      transition: background 0.15s;
+    }
+    #error-panel-header:hover { background: #21262d; }
+    #error-panel-label { flex: 1; font-weight: 600; letter-spacing: 0.4px; text-transform: uppercase; }
+    #error-badge {
+      display: none;
+      background: #da3633;
+      color: #fff;
+      font-size: 9px;
+      font-weight: 700;
+      padding: 1px 5px;
+      border-radius: 8px;
+      min-width: 16px;
+      text-align: center;
+    }
+    #error-badge.visible { display: inline-block; }
+    #error-panel-toggle { font-size: 10px; color: #8b949e; line-height: 1; }
+    #error-panel-body {
+      display: none;
+      max-height: 140px;
+      overflow-y: auto;
+      padding: 4px 0;
+    }
+    #error-panel.open #error-panel-body { display: block; }
+    #error-panel.open #error-panel-toggle { transform: rotate(180deg); }
+    .error-entry {
+      display: flex;
+      gap: 8px;
+      padding: 3px 14px;
+      font-size: 10px;
+      border-bottom: 1px solid #21262d;
+      line-height: 1.4;
+    }
+    .error-entry:last-child { border-bottom: none; }
+    .error-ts { color: #6e7681; white-space: nowrap; flex-shrink: 0; font-variant-numeric: tabular-nums; }
+    .error-src { color: #f0883e; font-weight: 700; flex-shrink: 0; }
+    .error-msg { color: #e6edf3; word-break: break-word; }
 
     /* ── Map ── */
     #map { flex: 1; background: #0d1117; }
@@ -320,22 +468,144 @@
     .popup-row { display: flex; justify-content: space-between; gap: 12px; margin: 2px 0; }
     .popup-key { color: #8b949e; }
     .popup-val { color: #e6edf3; font-weight: 500; }
+
+    /* ── Mobile drag handle (hidden on desktop) ── */
+    #mob-drag-handle { display: none; }
+
+    /* ── Mobile FAB + backdrop (hidden on desktop) ── */
+    #mob-fab      { display: none; }
+    #mob-backdrop { display: none; }
+
+    /* ── Mobile layout (≤767px) ── */
+    @media (max-width: 767px) {
+      /* Map fills full screen */
+      #map {
+        position: fixed;
+        inset: 0;
+        z-index: 0;
+      }
+
+      /* Sidebar becomes a slide-up bottom sheet */
+      #sidebar {
+        position: fixed;
+        bottom: 0; left: 0; right: 0;
+        width: 100%;
+        height: 68vh;
+        min-width: unset;
+        border-right: none;
+        border-top: 1px solid #30363d;
+        border-radius: 16px 16px 0 0;
+        z-index: 1000;
+        transform: translateY(100%);
+        transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+        box-shadow: 0 -6px 32px rgba(0,0,0,0.6);
+      }
+      #sidebar.mob-open { transform: translateY(0); }
+
+      /* Drag handle pill */
+      #mob-drag-handle {
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        flex-shrink: 0;
+        height: 24px;
+        cursor: pointer;
+        background: #161b22;
+        border-radius: 16px 16px 0 0;
+      }
+      #mob-drag-handle::before {
+        content: '';
+        width: 40px; height: 4px;
+        background: #30363d;
+        border-radius: 2px;
+      }
+
+      /* Floating pill (status + drone count + open button) */
+      #mob-fab {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        position: fixed;
+        bottom: 20px;
+        left: 50%;
+        transform: translateX(-50%);
+        background: #21262d;
+        border: 1px solid #30363d;
+        border-radius: 28px;
+        padding: 9px 16px 9px 14px;
+        z-index: 990;
+        box-shadow: 0 4px 20px rgba(0,0,0,0.6);
+        transition: opacity 0.2s, transform 0.2s;
+        white-space: nowrap;
+      }
+      #mob-fab.hidden { opacity: 0; pointer-events: none; transform: translateX(-50%) translateY(8px); }
+
+      #mob-dot {
+        width: 8px; height: 8px;
+        border-radius: 50%;
+        background: #f85149;
+        flex-shrink: 0;
+        transition: background 0.3s;
+      }
+      #mob-dot.connected { background: #3fb950; }
+
+      #mob-count { font-size: 12px; color: #8b949e; }
+
+      #mob-toggle {
+        background: none;
+        border: none;
+        color: #58a6ff;
+        font-size: 13px;
+        font-weight: 600;
+        cursor: pointer;
+        padding: 2px 0 2px 6px;
+        border-left: 1px solid #30363d;
+        margin-left: 2px;
+      }
+
+      /* Backdrop */
+      #mob-backdrop {
+        display: block;
+        position: fixed;
+        inset: 0;
+        background: rgba(0,0,0,0.45);
+        z-index: 999;
+        opacity: 0;
+        pointer-events: none;
+        transition: opacity 0.3s;
+      }
+      #mob-backdrop.active { opacity: 1; pointer-events: all; }
+
+      /* Toast repositions above FAB */
+      #toast { left: 16px; right: 16px; bottom: 80px; }
+
+      /* Larger tap targets in drone/history cards */
+      .drone-card, .history-card { padding: 12px 14px; }
+
+      /* Config sub-tabs for touch */
+      .cfg-tab { padding: 10px 14px; font-size: 12px; }
+
+      /* Bigger config inputs for touch */
+      .cfg-input, .cfg-select { padding: 8px 10px; font-size: 14px; }
+      .cfg-row label { font-size: 13px; }
+    }
   </style>
 </head>
 <body>
 
 <div id="sidebar">
+  <div id="mob-drag-handle"></div>
   <div id="sidebar-header">
     <span id="status-dot"></span>
     <h1><span id="header-sensor-name">Drone Detection</span> <span id="app-version" style="font-size:11px;font-weight:400;color:#8b949e"></span></h1>
     <span id="drone-count">0 drones</span>
-    <button id="btn-settings" title="Settings">&#9881;</button>
   </div>
 
   <!-- View toggle -->
   <div id="view-toggle">
     <button class="view-tab active" id="tab-live">Live</button>
     <button class="view-tab" id="tab-history">History</button>
+    <button class="view-tab" id="tab-settings">Settings</button>
   </div>
 
   <!-- Drone list (default view) -->
@@ -356,9 +626,20 @@
     </div>
   </div>
 
-  <!-- Settings panel (hidden until gear clicked) -->
+  <!-- Settings panel (third tab) -->
   <div id="settings-panel">
+    <div id="cfg-tabs">
+      <button class="cfg-tab active" data-pane="cfg-pane-connection">Connection</button>
+      <button class="cfg-tab" data-pane="cfg-pane-sensor">Sensor</button>
+      <button class="cfg-tab" data-pane="cfg-pane-map">Map</button>
+      <button class="cfg-tab" data-pane="cfg-pane-alerts">Alerts</button>
+      <button class="cfg-tab" data-pane="cfg-pane-tak">TAK</button>
+      <button class="cfg-tab" data-pane="cfg-pane-data">Data</button>
+      <button class="cfg-tab" data-pane="cfg-pane-updates">Updates</button>
+    </div>
+    <div class="cfg-tab-content">
 
+    <div class="cfg-tab-pane active" id="cfg-pane-connection">
     <!-- Connection -->
     <div class="cfg-section">
       <div class="cfg-section-title">Connection</div>
@@ -397,7 +678,9 @@
         <div id="cfg-conn-status"></div>
       </div>
     </div>
+    </div><!-- /cfg-pane-connection -->
 
+    <div class="cfg-tab-pane" id="cfg-pane-sensor">
     <!-- Sensor -->
     <div class="cfg-section">
       <div class="cfg-section-title">Sensor</div>
@@ -433,7 +716,9 @@
         </div>
       </div>
     </div>
+    </div><!-- /cfg-pane-sensor -->
 
+    <div class="cfg-tab-pane" id="cfg-pane-map">
     <!-- Map display -->
     <div class="cfg-section">
       <div class="cfg-section-title">Map display</div>
@@ -456,12 +741,37 @@
         </div>
         <div class="cfg-btn-row">
           <button class="cfg-btn active" id="btn-lines">Lines: ON</button>
+          <button class="cfg-btn" id="btn-rings">Range Rings: OFF</button>
+        </div>
+        <div class="cfg-btn-row">
+          <button class="cfg-btn active" id="btn-trails">Trails: ON</button>
           <button class="cfg-btn danger" id="btn-clear">Clear drones</button>
         </div>
         <div class="cfg-row">
           <label>Tile cache</label>
           <span id="tile-cache-size" style="font-size:12px;color:#8b949e;flex:1">—</span>
           <button class="cfg-btn danger" id="btn-clear-tiles" style="flex:0;white-space:nowrap">Clear Map Cache</button>
+        </div>
+      </div>
+    </div>
+    </div><!-- /cfg-pane-map -->
+
+    <div class="cfg-tab-pane" id="cfg-pane-alerts">
+    <!-- Proximity alerts -->
+    <div class="cfg-section">
+      <div class="cfg-section-title">Proximity alerts</div>
+      <div class="cfg-rows">
+        <div class="cfg-row">
+          <label>Enabled</label>
+          <input id="cfg-proximity-enabled" type="checkbox" />
+        </div>
+        <div class="cfg-row">
+          <label>Distance (m)</label>
+          <input id="cfg-proximity-distance" class="cfg-input" type="number" min="10" step="10" placeholder="1000" />
+        </div>
+        <div class="cfg-row">
+          <label>Discord notify</label>
+          <input id="cfg-proximity-discord" type="checkbox" />
         </div>
       </div>
     </div>
@@ -476,7 +786,9 @@
         </div>
       </div>
     </div>
+    </div><!-- /cfg-pane-alerts -->
 
+    <div class="cfg-tab-pane" id="cfg-pane-tak">
     <!-- TAK -->
     <div class="cfg-section">
       <div class="cfg-section-title">TAK Server</div>
@@ -502,21 +814,60 @@
         </div>
       </div>
     </div>
+    </div><!-- /cfg-pane-tak -->
 
-    <!-- Save -->
+    <div class="cfg-tab-pane" id="cfg-pane-data">
+    <!-- History -->
     <div class="cfg-section">
+      <div class="cfg-section-title">History</div>
       <div class="cfg-rows">
         <div class="cfg-btn-row">
-          <button class="cfg-btn" id="cfg-save">Save settings</button>
+          <button class="cfg-btn" id="btn-export-history">Export JSON</button>
+          <button class="cfg-btn" id="btn-import-history">Import JSON</button>
         </div>
+        <input type="file" id="history-file-input" accept=".json,application/json" style="display:none" />
       </div>
     </div>
 
+    </div><!-- /cfg-pane-data -->
+
+    <div class="cfg-tab-pane" id="cfg-pane-updates">
+    <!-- Updates -->
+    <div class="cfg-section">
+      <div class="cfg-section-title">Software Updates</div>
+      <div class="cfg-rows">
+        <div class="cfg-btn-row">
+          <button class="cfg-btn" id="btn-check-updates">Check for updates</button>
+        </div>
+        <div id="update-status" style="font-size:12px;color:#8b949e;padding:4px 0;min-height:18px"></div>
+        <div id="update-info" style="display:none">
+          <div id="update-summary" style="font-size:12px;margin-bottom:8px"></div>
+          <div id="update-files" style="max-height:200px;overflow-y:auto;border:1px solid #30363d;border-radius:6px;background:#0d1117;margin-bottom:8px"></div>
+          <div class="cfg-btn-row">
+            <button class="cfg-btn" id="btn-download-updates" style="display:none">Download updates</button>
+          </div>
+        </div>
+        <div id="update-done" style="display:none">
+          <div id="update-done-msg" style="font-size:12px;color:#3fb950;margin-bottom:8px"></div>
+          <div class="cfg-btn-row">
+            <button class="cfg-btn danger" id="btn-restart-app">Restart application</button>
+          </div>
+        </div>
+      </div>
+    </div>
+    </div><!-- /cfg-pane-updates -->
+
+    </div><!-- /cfg-tab-content -->
+    <div class="cfg-tab-footer">
+      <div class="cfg-btn-row">
+        <button class="cfg-btn" id="cfg-save">Save settings</button>
+      </div>
+    </div>
   </div><!-- /settings-panel -->
 
   <!-- GPS footer always visible -->
   <div id="sensor-footer" class="no-fix">
-    <div class="sf-label"><span id="sf-icon">📡</span> <span id="footer-sensor-name">Sensor</span> position <span id="sensor-fix-badge">NO FIX</span></div>
+    <div class="sf-label" id="sf-label-toggle"><span id="sf-icon">📡</span> <span id="footer-sensor-name">Sensor</span> position <span id="sensor-fix-badge">NO FIX</span><span id="sf-toggle">▼</span></div>
     <div id="sensor-coords">
       <span class="sc-key">Lat</span>  <span class="sc-val" id="sc-lat">—</span>
       <span class="sc-key">Lon</span>  <span class="sc-val" id="sc-lon">—</span>
@@ -529,8 +880,26 @@
       <span class="sc-key">Age</span>  <span class="sc-val" id="sc-age">—</span>
     </div>
   </div>
+
+  <!-- Error panel (minimized by default) -->
+  <div id="error-panel">
+    <div id="error-panel-header">
+      <span id="error-panel-label">⚠ Errors</span>
+      <span id="error-badge"></span>
+      <span id="error-panel-toggle">▲</span>
+    </div>
+    <div id="error-panel-body">
+      <div id="error-list"></div>
+    </div>
+  </div>
 </div>
 
+<div id="mob-backdrop"></div>
+<div id="mob-fab">
+  <span id="mob-dot"></span>
+  <span id="mob-count">0 drones</span>
+  <button id="mob-toggle">Drones ▲</button>
+</div>
 <div id="map"></div>
 <div id="toast"></div>
 
@@ -608,6 +977,14 @@ let sensorCentered = false;
 let autoTrack  = false;
 let autoFit    = true;
 let showLines  = true;
+let rangeRings = false;
+let rangeRingLayers = [];   // Leaflet circle layers
+const RANGE_RING_RADII_M = [500, 1000, 2000, 5000, 10000];
+let showTrails = true;
+const TRAIL_MAX_POINTS = 200;
+let proximityEnabled  = false;
+let proximityDistance = 1000;   // meters
+let _audioCtx = null;
 let _historyMarkers = [];
 
 function clearHistoryMarkers() {
@@ -631,6 +1008,13 @@ function buildPopup(d) {
   const hagl = d.height_agl ? d.height_agl.toFixed(1)+' m' : 'N/A';
   const spd  = d.horizontal_speed ? d.horizontal_speed.toFixed(1)+' m/s' : 'N/A';
   const vspd = d.vertical_speed !== undefined ? d.vertical_speed.toFixed(1)+' m/s' : 'N/A';
+  let rangeRow = '';
+  if (validCoord(d.drone_lat, d.drone_lon)) {
+    const rel = sensorRelative(d.drone_lat, d.drone_lon);
+    if (rel) {
+      rangeRow = `<div class="popup-row"><span class="popup-key">Range</span><span class="popup-val">${fmtDistance(rel.dist)} @ ${Math.round(rel.brg)}° ${compassPoint(rel.brg)}</span></div>`;
+    }
+  }
   return `<div class="popup-title">🛸 ${escHtml(d.serial_number)}</div>
     <div class="popup-row"><span class="popup-key">Model</span><span class="popup-val">${escHtml(d.device_type||'Unknown')}</span></div>
     <div class="popup-row"><span class="popup-key">Alt (MSL)</span><span class="popup-val">${alt}</span></div>
@@ -638,7 +1022,8 @@ function buildPopup(d) {
     <div class="popup-row"><span class="popup-key">H. Speed</span><span class="popup-val">${spd}</span></div>
     <div class="popup-row"><span class="popup-key">V. Speed</span><span class="popup-val">${vspd}</span></div>
     <div class="popup-row"><span class="popup-key">RSSI</span><span class="popup-val">${d.rssi} dBm</span></div>
-    <div class="popup-row"><span class="popup-key">Freq</span><span class="popup-val">${freq}</span></div>`;
+    <div class="popup-row"><span class="popup-key">Freq</span><span class="popup-val">${freq}</span></div>
+    ${rangeRow}`;
 }
 
 function rssiPct(rssi) { return Math.max(0, Math.min(100, ((rssi+100)/70)*100)); }
@@ -648,8 +1033,9 @@ function rssiPct(rssi) { return Math.max(0, Math.min(100, ((rssi+100)/70)*100));
 function renderSidebar() {
   const list = document.getElementById('drone-list');
   const serials = Object.keys(drones);
-  document.getElementById('drone-count').textContent =
-    serials.length + (serials.length === 1 ? ' drone' : ' drones');
+  const countLabel = serials.length + (serials.length === 1 ? ' drone' : ' drones');
+  document.getElementById('drone-count').textContent = countLabel;
+  document.getElementById('mob-count').textContent   = countLabel;
 
   if (serials.length === 0) {
     list.innerHTML = '<div class="no-drones"><div class="icon">📡</div>Waiting for detections…</div>';
@@ -659,6 +1045,9 @@ function renderSidebar() {
   for (const serial of serials) {
     const d = drones[serial].data;
     const pct = rssiPct(d.rssi);
+    const rel = validCoord(d.drone_lat, d.drone_lon) ? sensorRelative(d.drone_lat, d.drone_lon) : null;
+    const rangeStr   = rel ? fmtDistance(rel.dist) : 'N/A';
+    const bearingStr = rel ? `${Math.round(rel.brg)}° ${compassPoint(rel.brg)}` : 'N/A';
     const card = document.createElement('div');
     card.className = 'drone-card' + (activeDrone === serial ? ' active' : '');
     card.innerHTML = `
@@ -676,6 +1065,10 @@ function renderSidebar() {
         <span class="stat-value">${d.rssi} dBm</span>
         <span class="stat-label">Freq</span>
         <span class="stat-value">${d.freq ? d.freq.toFixed(1)+' MHz' : 'N/A'}</span>
+        <span class="stat-label">Range</span>
+        <span class="stat-value">${rangeStr}</span>
+        <span class="stat-label">Bearing</span>
+        <span class="stat-value">${bearingStr}</span>
       </div>
       <div class="rssi-bar"><div class="rssi-fill" style="width:${pct}%"></div></div>`;
     card.addEventListener('click', () => {
@@ -683,6 +1076,7 @@ function renderSidebar() {
       renderSidebar();
       const e = drones[serial];
       if (e?.droneMarker) { map.setView(e.droneMarker.getLatLng(), Math.max(map.getZoom(), 16)); e.droneMarker.openPopup(); }
+      if (mobMq.matches) closeDrawer();
     });
     list.appendChild(card);
   }
@@ -710,11 +1104,166 @@ function updateLinesVisibility() {
       showLines ? ln.addTo(map) : map.removeLayer(ln);
 }
 
+function fmtRingLabel(m) {
+  return m >= 1000 ? (m/1000) + ' km' : m + ' m';
+}
+
+function clearRangeRings() {
+  for (const layer of rangeRingLayers) map.removeLayer(layer);
+  rangeRingLayers = [];
+}
+
+function updateRangeRings() {
+  clearRangeRings();
+  if (!rangeRings || !sensorMarker) return;
+  const center = sensorMarker.getLatLng();
+  for (const r of RANGE_RING_RADII_M) {
+    const circle = L.circle(center, {
+      radius: r,
+      color: '#3fb950',
+      weight: 1,
+      opacity: 0.7,
+      fill: false,
+      interactive: false,
+    }).addTo(map);
+    const label = L.marker(
+      [center.lat, center.lng],
+      {
+        icon: L.divIcon({
+          className: 'range-ring-label',
+          html: `<span>${fmtRingLabel(r)}</span>`,
+          iconSize: [40, 14],
+          iconAnchor: [20, 7],
+        }),
+        interactive: false,
+        keyboard: false,
+      }
+    );
+    // Place label on the north edge of the ring
+    const northLat = center.lat + (r / 111320);
+    label.setLatLng([northLat, center.lng]);
+    label.addTo(map);
+    rangeRingLayers.push(circle, label);
+  }
+}
+
+// ── Geo helpers ────────────────────────────────────────────────────────────
+function haversineMeters(lat1, lon1, lat2, lon2) {
+  const R = 6371000;
+  const toRad = d => d * Math.PI / 180;
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const a = Math.sin(dLat/2)**2 +
+            Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon/2)**2;
+  return 2 * R * Math.asin(Math.sqrt(a));
+}
+
+function bearingDeg(lat1, lon1, lat2, lon2) {
+  const toRad = d => d * Math.PI / 180;
+  const toDeg = r => r * 180 / Math.PI;
+  const dLon = toRad(lon2 - lon1);
+  const y = Math.sin(dLon) * Math.cos(toRad(lat2));
+  const x = Math.cos(toRad(lat1)) * Math.sin(toRad(lat2)) -
+            Math.sin(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.cos(dLon);
+  return (toDeg(Math.atan2(y, x)) + 360) % 360;
+}
+
+function compassPoint(deg) {
+  const dirs = ['N','NNE','NE','ENE','E','ESE','SE','SSE','S','SSW','SW','WSW','W','WNW','NW','NNW'];
+  return dirs[Math.round(deg / 22.5) % 16];
+}
+
+function fmtDistance(m) {
+  if (m == null) return '—';
+  return m >= 1000 ? (m/1000).toFixed(2) + ' km' : Math.round(m) + ' m';
+}
+
+function sensorRelative(lat, lon) {
+  if (!sensorMarker) return null;
+  const s = sensorMarker.getLatLng();
+  const dist = haversineMeters(s.lat, s.lng, lat, lon);
+  const brg  = bearingDeg(s.lat, s.lng, lat, lon);
+  return { dist, brg };
+}
+
+// ── Trails ─────────────────────────────────────────────────────────────────
+function updateTrail(e) {
+  if (!e.droneMarker) return;
+  const ll = e.droneMarker.getLatLng();
+  e.trail = e.trail || [];
+  const last = e.trail[e.trail.length - 1];
+  if (!last || last[0] !== ll.lat || last[1] !== ll.lng) {
+    e.trail.push([ll.lat, ll.lng]);
+    if (e.trail.length > TRAIL_MAX_POINTS) e.trail.shift();
+  }
+  if (e.trailLine) map.removeLayer(e.trailLine);
+  e.trailLine = null;
+  if (showTrails && e.trail.length >= 2) {
+    e.trailLine = L.polyline(e.trail, {
+      color: '#58a6ff',
+      weight: 2,
+      opacity: 0.75,
+      interactive: false,
+    }).addTo(map);
+  }
+}
+
+function updateTrailsVisibility() {
+  for (const e of Object.values(drones)) {
+    if (e.trailLine) { map.removeLayer(e.trailLine); e.trailLine = null; }
+    if (showTrails && e.trail && e.trail.length >= 2) {
+      e.trailLine = L.polyline(e.trail, {
+        color: '#58a6ff', weight: 2, opacity: 0.75, interactive: false,
+      }).addTo(map);
+    }
+  }
+}
+
+// ── Proximity alerts ───────────────────────────────────────────────────────
+function beep() {
+  try {
+    if (!_audioCtx) _audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const ctx = _audioCtx;
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = 'sine';
+    osc.frequency.value = 880;
+    gain.gain.setValueAtTime(0.0001, ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.25, ctx.currentTime + 0.02);
+    gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.45);
+    osc.connect(gain).connect(ctx.destination);
+    osc.start();
+    osc.stop(ctx.currentTime + 0.5);
+  } catch {}
+}
+
+function fireProximityAlert(serial, dist) {
+  const msg = `⚠ ${serial} within ${fmtDistance(dist)} of sensor`;
+  showToast(msg, 'err');
+  beep();
+  if ('Notification' in window && Notification.permission === 'granted') {
+    try { new Notification('Drone proximity alert', { body: msg }); } catch {}
+  }
+}
+
+function checkProximity(e) {
+  if (!proximityEnabled || !sensorMarker || !e.droneMarker) {
+    e.insideProximity = false;
+    return;
+  }
+  const ll = e.droneMarker.getLatLng();
+  const s  = sensorMarker.getLatLng();
+  const dist = haversineMeters(s.lat, s.lng, ll.lat, ll.lng);
+  const inside = dist <= proximityDistance;
+  if (inside && !e.insideProximity) fireProximityAlert(e.data.serial_number, dist);
+  e.insideProximity = inside;
+}
+
 
 // ── Drone upsert / remove ──────────────────────────────────────────────────
 function upsertDrone(d) {
   const serial = d.serial_number;
-  if (!drones[serial]) drones[serial] = { data: d, droneMarker: null, pilotMarker: null, homeMarker: null, lines: [] };
+  if (!drones[serial]) drones[serial] = { data: d, droneMarker: null, pilotMarker: null, homeMarker: null, lines: [], trail: [], trailLine: null, insideProximity: false };
   const e = drones[serial];
   e.data = d;
 
@@ -754,6 +1303,9 @@ function upsertDrone(d) {
   }
   if (showLines) for (const ln of e.lines) ln.addTo(map);
 
+  updateTrail(e);
+  checkProximity(e);
+
   renderSidebar();
   if (autoFit) fitAll();
 }
@@ -763,6 +1315,7 @@ function removeDrone(serial) {
   if (!e) return;
   for (const layer of [e.droneMarker, e.pilotMarker, e.homeMarker]) if (layer) map.removeLayer(layer);
   for (const ln of e.lines) map.removeLayer(ln);
+  if (e.trailLine) map.removeLayer(e.trailLine);
   delete drones[serial];
   if (activeDrone === serial) activeDrone = null;
   renderSidebar();
@@ -795,7 +1348,9 @@ function upsertSensor(pos) {
 
   if (hasfix && pos.lat != null && pos.lon != null) {
     const ll = [pos.lat, pos.lon];
-    const popup = `<div class="popup-title">🗼 Sensor</div>
+    const sIcon = document.getElementById('cfg-sensor-icon').value || '📡';
+    const sName = document.getElementById('cfg-sensor-name').value || 'Sensor';
+    const popup = `<div class="popup-title">${sIcon} ${escHtml(sName)}</div>
       <div class="popup-row"><span class="popup-key">Lat</span><span class="popup-val">${pos.lat.toFixed(6)}</span></div>
       <div class="popup-row"><span class="popup-key">Lon</span><span class="popup-val">${pos.lon.toFixed(6)}</span></div>
       <div class="popup-row"><span class="popup-key">Alt</span><span class="popup-val">${altStr}</span></div>
@@ -806,6 +1361,8 @@ function upsertSensor(pos) {
 
     if (!sensorCentered) { map.setView(ll, 15); sensorCentered = true; }
     else if (autoTrack)  { map.setView(ll, map.getZoom()); }
+
+    if (rangeRings) updateRangeRings();
   }
 
   const footer = document.getElementById('sensor-footer');
@@ -826,6 +1383,49 @@ function upsertSensor(pos) {
 setInterval(() => { if (lastFixWallTime) document.getElementById('sc-age').textContent = fmtAge(lastFixWallTime); }, 1000);
 
 
+// ── Error panel ────────────────────────────────────────────────────────────
+const errorPanel      = document.getElementById('error-panel');
+const errorList       = document.getElementById('error-list');
+const errorBadge      = document.getElementById('error-badge');
+let   errorCount      = 0;
+const MAX_ERROR_ENTRIES = 200;
+
+document.getElementById('error-panel-header').addEventListener('click', () => {
+  errorPanel.classList.toggle('open');
+  if (errorPanel.classList.contains('open')) {
+    errorList.parentElement.scrollTop = errorList.parentElement.scrollHeight;
+  }
+});
+
+function appendError(msg) {
+  errorCount++;
+  const ts = new Date(msg.ts * 1000);
+  const hh = String(ts.getHours()).padStart(2, '0');
+  const mm = String(ts.getMinutes()).padStart(2, '0');
+  const ss = String(ts.getSeconds()).padStart(2, '0');
+  const timeStr = `${hh}:${mm}:${ss}`;
+
+  const entry = document.createElement('div');
+  entry.className = 'error-entry';
+  entry.innerHTML = `<span class="error-ts">${timeStr}</span><span class="error-src">[${escHtml(msg.source)}]</span><span class="error-msg">${escHtml(msg.message)}</span>`;
+  errorList.appendChild(entry);
+
+  // Trim old entries
+  while (errorList.children.length > MAX_ERROR_ENTRIES) {
+    errorList.removeChild(errorList.firstChild);
+  }
+
+  // Always show total error count
+  errorBadge.textContent = errorCount > 999 ? '999+' : errorCount;
+  errorBadge.classList.add('visible');
+
+  // Auto-scroll if panel is open
+  if (errorPanel.classList.contains('open')) {
+    errorList.parentElement.scrollTop = errorList.parentElement.scrollHeight;
+  }
+}
+
+
 // ── SSE ────────────────────────────────────────────────────────────────────
 const dot = document.getElementById('status-dot');
 let es;
@@ -837,7 +1437,11 @@ function connect() {
     if      (msg.type === 'update')         upsertDrone(msg.drone);
     else if (msg.type === 'remove')         removeDrone(msg.serial);
     else if (msg.type === 'sensor')         upsertSensor(msg.position);
-    else if (msg.type === 'antsdr_status')  dot.classList.toggle('connected', msg.connected);
+    else if (msg.type === 'antsdr_status') {
+      dot.classList.toggle('connected', msg.connected);
+      document.getElementById('mob-dot').classList.toggle('connected', msg.connected);
+    }
+    else if (msg.type === 'error') appendError(msg);
   };
   es.onerror = () => { es.close(); setTimeout(connect, 3000); };
 }
@@ -845,27 +1449,8 @@ connect();
 loadConfig();  // apply persisted settings immediately on page load
 
 
-// ── Settings panel toggle ──────────────────────────────────────────────────
-const btnSettings    = document.getElementById('btn-settings');
-const droneList      = document.getElementById('drone-list');
+// ── Settings panel ─────────────────────────────────────────────────────────
 const settingsPanel  = document.getElementById('settings-panel');
-
-const viewToggleEl = document.getElementById('view-toggle');
-
-btnSettings.addEventListener('click', () => {
-  const open = settingsPanel.classList.toggle('open');
-  viewToggleEl.style.display = open ? 'none' : '';
-  if (!open) {
-    // restore whichever tab is active
-    droneListEl.style.display   = tabLive.classList.contains('active')    ? ''      : 'none';
-    historyListEl.style.display = tabHistory.classList.contains('active') ? 'block' : 'none';
-  } else {
-    droneListEl.style.display   = 'none';
-    historyListEl.style.display = 'none';
-  }
-  btnSettings.classList.toggle('active', open);
-  if (open) { loadConfig(); refreshTileCacheSize(); }
-});
 
 
 // ── Load config from server ────────────────────────────────────────────────
@@ -895,15 +1480,34 @@ function loadConfig() {
       if (cfg.sensor_lat) document.getElementById('cfg-sensor-lat').value = cfg.sensor_lat;
       if (cfg.sensor_lon) document.getElementById('cfg-sensor-lon').value = cfg.sensor_lon;
 
-      autoFit   = !!cfg.auto_fit;
-      autoTrack = !!cfg.auto_track;
-      showLines = !!cfg.show_lines;
+      autoFit    = !!cfg.auto_fit;
+      autoTrack  = !!cfg.auto_track;
+      showLines  = !!cfg.show_lines;
+      rangeRings = !!cfg.range_rings;
+      showTrails = cfg.show_trails !== undefined ? !!cfg.show_trails : true;
+      proximityEnabled  = !!cfg.proximity_alerts;
+      proximityDistance = parseInt(cfg.proximity_distance_m, 10) || 1000;
 
       document.getElementById('btn-follow').classList.toggle('active', autoFit);
       document.getElementById('btn-track').classList.toggle('active', autoTrack);
       document.getElementById('btn-lines').classList.toggle('active', showLines);
       document.getElementById('btn-lines').textContent = 'Lines: ' + (showLines ? 'ON' : 'OFF');
+      document.getElementById('btn-rings').classList.toggle('active', rangeRings);
+      document.getElementById('btn-rings').textContent = 'Range Rings: ' + (rangeRings ? 'ON' : 'OFF');
+      document.getElementById('btn-trails').classList.toggle('active', showTrails);
+      document.getElementById('btn-trails').textContent = 'Trails: ' + (showTrails ? 'ON' : 'OFF');
+      document.getElementById('cfg-proximity-enabled').checked  = proximityEnabled;
+      document.getElementById('cfg-proximity-distance').value   = proximityDistance;
+      document.getElementById('cfg-proximity-discord').checked  = !!cfg.proximity_discord;
       updateLinesVisibility();
+      updateTrailsVisibility();
+      if (rangeRings && sensorMarker) {
+        map.setView(sensorMarker.getLatLng(), map.getZoom());
+        updateRangeRings();
+      }
+      if (proximityEnabled && 'Notification' in window && Notification.permission === 'default') {
+        Notification.requestPermission().catch(() => {});
+      }
     })
     .catch(() => {});
 }
@@ -964,6 +1568,11 @@ function postConfig(reconnect) {
     auto_fit:         autoFit,
     auto_track:       autoTrack,
     show_lines:       showLines,
+    range_rings:      rangeRings,
+    show_trails:      showTrails,
+    proximity_alerts:     document.getElementById('cfg-proximity-enabled').checked,
+    proximity_distance_m: parseInt(document.getElementById('cfg-proximity-distance').value, 10) || 1000,
+    proximity_discord:    document.getElementById('cfg-proximity-discord').checked,
     sensor_icon:             document.getElementById('cfg-sensor-icon').value,
     sensor_name:             document.getElementById('cfg-sensor-name').value.trim() || 'Sensor',
     sensor_location_source:  document.getElementById('cfg-sensor-location-source').value,
@@ -1045,6 +1654,46 @@ document.getElementById('btn-lines').addEventListener('click', function () {
   updateLinesVisibility();
 });
 
+document.getElementById('btn-trails').addEventListener('click', function () {
+  showTrails = !showTrails;
+  this.textContent = 'Trails: ' + (showTrails ? 'ON' : 'OFF');
+  this.classList.toggle('active', showTrails);
+  updateTrailsVisibility();
+});
+
+document.getElementById('cfg-proximity-enabled').addEventListener('change', function () {
+  proximityEnabled = this.checked;
+  if (proximityEnabled && 'Notification' in window && Notification.permission === 'default') {
+    Notification.requestPermission().catch(() => {});
+  }
+  if (!proximityEnabled) for (const e of Object.values(drones)) e.insideProximity = false;
+});
+
+document.getElementById('cfg-proximity-distance').addEventListener('change', function () {
+  const v = parseInt(this.value, 10);
+  if (v >= 10) {
+    proximityDistance = v;
+    // Reset latched state so a re-arm with new threshold can fire again
+    for (const e of Object.values(drones)) e.insideProximity = false;
+  }
+});
+
+document.getElementById('btn-rings').addEventListener('click', function () {
+  rangeRings = !rangeRings;
+  this.textContent = 'Range Rings: ' + (rangeRings ? 'ON' : 'OFF');
+  this.classList.toggle('active', rangeRings);
+  if (rangeRings) {
+    if (sensorMarker) {
+      map.setView(sensorMarker.getLatLng(), map.getZoom());
+      updateRangeRings();
+    } else {
+      showToast('No sensor position yet — rings will appear once a fix is acquired.', 'ok');
+    }
+  } else {
+    clearRangeRings();
+  }
+});
+
 document.getElementById('btn-clear').addEventListener('click', () => {
   for (const s of Object.keys(drones)) removeDrone(s);
 });
@@ -1054,21 +1703,49 @@ const droneListEl   = document.getElementById('drone-list');
 const historyListEl = document.getElementById('history-list');
 const tabLive       = document.getElementById('tab-live');
 const tabHistory    = document.getElementById('tab-history');
+const tabSettings   = document.getElementById('tab-settings');
+
+const sensorFooterEl = document.getElementById('sensor-footer');
+
+function switchTab(activeTab) {
+  tabLive.classList.toggle('active', activeTab === 'live');
+  tabHistory.classList.toggle('active', activeTab === 'history');
+  tabSettings.classList.toggle('active', activeTab === 'settings');
+  droneListEl.style.display   = activeTab === 'live'     ? ''     : 'none';
+  historyListEl.style.display = activeTab === 'history'  ? 'block': 'none';
+  settingsPanel.style.display = activeTab === 'settings' ? 'flex' : 'none';
+  sensorFooterEl.style.display = activeTab === 'settings' ? 'none' : '';
+}
+
+document.getElementById('sf-label-toggle').addEventListener('click', () => {
+  sensorFooterEl.classList.toggle('collapsed');
+});
 
 tabLive.addEventListener('click', () => {
-  tabLive.classList.add('active');
-  tabHistory.classList.remove('active');
-  droneListEl.style.display   = '';
-  historyListEl.style.display = 'none';
+  switchTab('live');
   clearHistoryMarkers();
 });
 
 tabHistory.addEventListener('click', () => {
-  tabHistory.classList.add('active');
-  tabLive.classList.remove('active');
-  droneListEl.style.display   = 'none';
-  historyListEl.style.display = 'block';
+  switchTab('history');
   loadHistory();
+});
+
+tabSettings.addEventListener('click', () => {
+  switchTab('settings');
+  loadConfig();
+  refreshTileCacheSize();
+});
+
+// Config sub-tabs
+document.getElementById('cfg-tabs').addEventListener('click', (e) => {
+  const btn = e.target.closest('.cfg-tab');
+  if (!btn) return;
+  document.querySelectorAll('#cfg-tabs .cfg-tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('.cfg-tab-pane').forEach(p => p.classList.remove('active'));
+  btn.classList.add('active');
+  const pane = document.getElementById(btn.dataset.pane);
+  if (pane) pane.classList.add('active');
 });
 
 function fmtLatLon(lat, lon) {
@@ -1156,6 +1833,7 @@ function loadHistory() {
             if (d.home_lat && d.home_lon)
               _historyMarkers.push(L.marker([d.home_lat, d.home_lon], { icon: ICONS.home }).addTo(map));
             map.setView([d.drone_lat, d.drone_lon], Math.max(map.getZoom(), 16));
+            if (mobMq.matches) closeDrawer();
           });
         }
         historyCardsEl.appendChild(card);
@@ -1208,6 +1886,184 @@ document.getElementById('btn-clear-tiles').addEventListener('click', () => {
     .then(() => { refreshTileCacheSize(); showToast('Tile cache cleared.'); })
     .catch(() => showToast('Clear failed.', 'err'));
 });
+
+
+// ── History import / export ────────────────────────────────────────────────
+document.getElementById('btn-export-history').addEventListener('click', () => {
+  fetch('/history')
+    .then(r => r.json())
+    .then(data => {
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+      const url  = URL.createObjectURL(blob);
+      const a    = document.createElement('a');
+      const ts   = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+      a.href     = url;
+      a.download = `dji-history-${ts}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+      showToast(`Exported ${Object.keys(data).length} entries.`);
+    })
+    .catch(() => showToast('Export failed.', 'err'));
+});
+
+document.getElementById('btn-import-history').addEventListener('click', () => {
+  document.getElementById('history-file-input').click();
+});
+
+document.getElementById('history-file-input').addEventListener('change', function () {
+  const file = this.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = e => {
+    let parsed;
+    try { parsed = JSON.parse(e.target.result); }
+    catch { showToast('Invalid JSON file.', 'err'); return; }
+    fetch('/history', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(parsed),
+    })
+      .then(r => r.json())
+      .then(d => {
+        if (d.ok) { showToast(`Imported ${d.count} entries.`); loadHistory(); }
+        else showToast('Import error: ' + d.error, 'err');
+      })
+      .catch(() => showToast('Import failed.', 'err'));
+  };
+  reader.readAsText(file);
+  this.value = '';  // reset so same file can be re-selected
+});
+
+
+// ── Updates ───────────────────────────────────────────────────────────────
+const updateStatusEl   = document.getElementById('update-status');
+const updateInfoEl     = document.getElementById('update-info');
+const updateSummaryEl  = document.getElementById('update-summary');
+const updateFilesEl    = document.getElementById('update-files');
+const updateDoneEl     = document.getElementById('update-done');
+const updateDoneMsgEl  = document.getElementById('update-done-msg');
+const btnCheckUpdates  = document.getElementById('btn-check-updates');
+const btnDownload      = document.getElementById('btn-download-updates');
+const btnRestart       = document.getElementById('btn-restart-app');
+
+btnCheckUpdates.addEventListener('click', () => {
+  btnCheckUpdates.disabled = true;
+  updateStatusEl.textContent = 'Checking for updates…';
+  updateStatusEl.style.color = '#8b949e';
+  updateInfoEl.style.display = 'none';
+  updateDoneEl.style.display = 'none';
+
+  fetch('/update-check', { method: 'POST' })
+    .then(r => r.json())
+    .then(data => {
+      btnCheckUpdates.disabled = false;
+      if (!data.ok) {
+        updateStatusEl.textContent = 'Error: ' + data.error;
+        updateStatusEl.style.color = '#f85149';
+        return;
+      }
+      if (data.behind === 0) {
+        updateStatusEl.innerHTML = `<span style="color:#3fb950">✓ Up to date</span> &nbsp;·&nbsp; branch <b>${escHtml(data.branch)}</b> @ <code>${escHtml(data.current)}</code>`;
+        updateInfoEl.style.display = 'none';
+        return;
+      }
+      updateStatusEl.textContent = '';
+      updateInfoEl.style.display = '';
+      updateSummaryEl.innerHTML =
+        `<span style="color:#d29922"><b>${data.behind}</b> update${data.behind > 1 ? 's' : ''} available</span>` +
+        ` &nbsp;·&nbsp; branch <b>${escHtml(data.branch)}</b>` +
+        `<br><span style="color:#8b949e">Current: <code>${escHtml(data.current)}</code> → Latest: <code>${escHtml(data.latest)}</code></span>` +
+        (data.latest_message ? `<br><span style="color:#8b949e">${escHtml(data.latest_message)}</span>` : '');
+
+      updateFilesEl.innerHTML = '';
+      for (const f of data.files) {
+        const row = document.createElement('div');
+        row.className = 'update-file-row';
+        row.innerHTML = `<span class="update-file-badge ${escHtml(f.status)}">${escHtml(f.status)}</span><span class="update-file-name">${escHtml(f.file)}</span>`;
+        updateFilesEl.appendChild(row);
+      }
+      if (data.files.length === 0) {
+        updateFilesEl.innerHTML = '<div style="padding:8px 10px;font-size:11px;color:#8b949e">No file details available.</div>';
+      }
+      btnDownload.style.display = '';
+    })
+    .catch(e => {
+      btnCheckUpdates.disabled = false;
+      updateStatusEl.textContent = 'Check failed: ' + e.message;
+      updateStatusEl.style.color = '#f85149';
+    });
+});
+
+btnDownload.addEventListener('click', () => {
+  btnDownload.disabled = true;
+  btnDownload.textContent = 'Downloading…';
+
+  fetch('/update-download', { method: 'POST' })
+    .then(r => r.json())
+    .then(data => {
+      if (!data.ok) {
+        btnDownload.disabled = false;
+        btnDownload.textContent = 'Download updates';
+        showToast('Download failed: ' + data.error, 'err');
+        return;
+      }
+      btnDownload.style.display = 'none';
+      updateInfoEl.style.display = 'none';
+      updateStatusEl.textContent = '';
+      updateDoneEl.style.display = '';
+      updateDoneMsgEl.textContent = '✓ Updates downloaded successfully. Restart to apply.';
+    })
+    .catch(e => {
+      btnDownload.disabled = false;
+      btnDownload.textContent = 'Download updates';
+      showToast('Download failed: ' + e.message, 'err');
+    });
+});
+
+btnRestart.addEventListener('click', () => {
+  if (!confirm('Restart the application now? The page will reload in a few seconds.')) return;
+  btnRestart.disabled = true;
+  btnRestart.textContent = 'Restarting…';
+  updateDoneMsgEl.textContent = 'Restarting… the page will reload automatically.';
+
+  fetch('/update-restart', { method: 'POST' })
+    .then(() => {
+      setTimeout(() => {
+        const tryReload = () => {
+          fetch('/config').then(() => location.reload()).catch(() => setTimeout(tryReload, 2000));
+        };
+        tryReload();
+      }, 3000);
+    })
+    .catch(() => {
+      setTimeout(() => location.reload(), 5000);
+    });
+});
+
+
+// ── Mobile drawer ──────────────────────────────────────────────────────────
+const mobMq       = window.matchMedia('(max-width: 767px)');
+const mobFab      = document.getElementById('mob-fab');
+const mobBackdrop = document.getElementById('mob-backdrop');
+const sidebarEl   = document.getElementById('sidebar');
+
+function openDrawer() {
+  sidebarEl.classList.add('mob-open');
+  mobFab.classList.add('hidden');
+  mobBackdrop.classList.add('active');
+  map.invalidateSize();
+}
+
+function closeDrawer() {
+  sidebarEl.classList.remove('mob-open');
+  mobFab.classList.remove('hidden');
+  mobBackdrop.classList.remove('active');
+  map.invalidateSize();
+}
+
+document.getElementById('mob-toggle').addEventListener('click', openDrawer);
+document.getElementById('mob-drag-handle').addEventListener('click', closeDrawer);
+mobBackdrop.addEventListener('click', closeDrawer);
 </script>
 </body>
 </html>

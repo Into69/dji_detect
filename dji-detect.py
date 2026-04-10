@@ -3,14 +3,17 @@ DJI Drone Detection Web App
 Receives drone data from ANTsdr via TCP, displays live positions on a map.
 """
 
-VERSION = "0.1.4"
+VERSION = "0.1.7"
 
 import argparse
 import collections
 import json
 import math
+import os
 import queue
 import re
+import subprocess
+import sys
 try:
     import serial as _serial
     _SERIAL_OK = True
@@ -42,6 +45,11 @@ antsdr_config: dict = {
     "auto_fit":        True,
     "auto_track":      False,
     "show_lines":      True,
+    "range_rings":     False,
+    "show_trails":     True,
+    "proximity_alerts":   False,
+    "proximity_distance_m": 1000,
+    "proximity_discord":  False,
     "sensor_icon":             "📡",
     "sensor_name":             "Sensor",
     "sensor_location_source":  "gpsd",   # "gpsd" or "manual"
@@ -100,6 +108,11 @@ def load_config():
             "auto_fit":         ("auto_fit",          bool),
             "auto_track":       ("auto_track",        bool),
             "show_lines":       ("show_lines",        bool),
+            "range_rings":      ("range_rings",       bool),
+            "show_trails":      ("show_trails",       bool),
+            "proximity_alerts":     ("proximity_alerts",     bool),
+            "proximity_distance_m": ("proximity_distance_m", int),
+            "proximity_discord":    ("proximity_discord",    bool),
             "sensor_icon":             ("sensor_icon",            str),
             "sensor_name":             ("sensor_name",            str),
             "sensor_location_source":  ("sensor_location_source", str),
@@ -131,6 +144,11 @@ def save_config():
         "auto_fit":        antsdr_config["auto_fit"],
         "auto_track":      antsdr_config["auto_track"],
         "show_lines":      antsdr_config["show_lines"],
+        "range_rings":     antsdr_config["range_rings"],
+        "show_trails":     antsdr_config["show_trails"],
+        "proximity_alerts":     antsdr_config["proximity_alerts"],
+        "proximity_distance_m": antsdr_config["proximity_distance_m"],
+        "proximity_discord":    antsdr_config["proximity_discord"],
         "sensor_icon":            antsdr_config["sensor_icon"],
         "sensor_name":            antsdr_config["sensor_name"],
         "sensor_location_source": antsdr_config["sensor_location_source"],
@@ -179,6 +197,52 @@ def broadcast(payload: dict):
                 dead.append(q)
         for q in dead:
             sse_queues.remove(q)
+
+
+_error_discord_last_sent: float = 0.0
+ERROR_DISCORD_INTERVAL = 15 * 60  # 15 minutes
+
+
+def _send_discord_error(source: str, message: str):
+    """POST an error embed to the configured Discord webhook."""
+    webhook = antsdr_config.get("discord_webhook", "").strip()
+    if not webhook:
+        return
+    try:
+        import urllib.request
+        import urllib.error
+
+        embed = {
+            "title":     f"⚠ Error [{source}]",
+            "description": message,
+            "color":     0xda3633,
+            "footer":    {"text": "DJI Drone Detection"},
+            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }
+        payload = json.dumps({"embeds": [embed]}).encode()
+        req = urllib.request.Request(
+            webhook,
+            data=payload,
+            headers={"Content-Type": "application/json", "User-Agent": "DJIDetect/1.0"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=5):
+                pass
+        except urllib.error.HTTPError as e:
+            body = e.read().decode("utf-8", errors="replace")
+            print(f"[Discord] Error alert HTTP {e.code}: {body}")
+    except Exception as e:
+        print(f"[Discord] Error alert failed: {e}")
+
+
+def broadcast_error(source: str, message: str):
+    global _error_discord_last_sent
+    broadcast({"type": "error", "source": source, "message": message, "ts": time.time()})
+    now = time.time()
+    if now - _error_discord_last_sent >= ERROR_DISCORD_INTERVAL:
+        _error_discord_last_sent = now
+        _io_executor.submit(_send_discord_error, source, message)
 
 
 # --- ANTsdr TCP receiver ---
@@ -267,6 +331,7 @@ def _parse_antsdr_line(line: str) -> dict | None:
         }
     except (ValueError, IndexError) as e:
         print(f"[ANTsdr] Parse error: {e} — line: {line!r}")
+        broadcast_error("ANTsdr", f"Parse error: {e}")
         return None
 
 
@@ -368,6 +433,90 @@ def _send_discord_alert(drone: dict):
 
 
 DISCORD_ALERT_INTERVAL = 30   # seconds between repeated Discord alerts per drone
+
+# Per-serial latch: True while drone is currently inside the proximity radius.
+# Resets when the drone leaves the radius (or goes stale) so re-entries fire again.
+_proximity_inside: dict = {}
+
+
+def _haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    R = 6371000.0
+    p1 = math.radians(lat1)
+    p2 = math.radians(lat2)
+    dp = math.radians(lat2 - lat1)
+    dl = math.radians(lon2 - lon1)
+    a = math.sin(dp/2)**2 + math.cos(p1)*math.cos(p2)*math.sin(dl/2)**2
+    return 2 * R * math.asin(math.sqrt(a))
+
+
+def _bearing_deg(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    p1 = math.radians(lat1)
+    p2 = math.radians(lat2)
+    dl = math.radians(lon2 - lon1)
+    y = math.sin(dl) * math.cos(p2)
+    x = math.cos(p1) * math.sin(p2) - math.sin(p1) * math.cos(p2) * math.cos(dl)
+    return (math.degrees(math.atan2(y, x)) + 360.0) % 360.0
+
+
+def _compass_point(deg: float) -> str:
+    dirs = ['N','NNE','NE','ENE','E','ESE','SE','SSE',
+            'S','SSW','SW','WSW','W','WNW','NW','NNW']
+    return dirs[round(deg / 22.5) % 16]
+
+
+def _send_discord_proximity_alert(drone: dict, distance_m: float, bearing: float):
+    """POST a proximity-alert embed to the configured Discord webhook."""
+    webhook = antsdr_config.get("discord_webhook", "").strip()
+    if not webhook:
+        return
+    try:
+        import urllib.request
+        import urllib.error
+
+        dlat = drone.get("drone_lat", 0)
+        dlon = drone.get("drone_lon", 0)
+        threshold = antsdr_config.get("proximity_distance_m", 1000)
+        dist_str = f"{distance_m/1000:.2f} km" if distance_m >= 1000 else f"{int(round(distance_m))} m"
+
+        fields = [
+            {"name": "Serial",   "value": drone.get("serial_number", "—"), "inline": True},
+            {"name": "Model",    "value": drone.get("device_type",   "—"), "inline": True},
+            {"name": "Distance", "value": f"{dist_str} (≤ {threshold} m)", "inline": True},
+            {"name": "Bearing",  "value": f"{int(round(bearing))}° {_compass_point(bearing)}", "inline": True},
+            {"name": "Drone",    "value": f"{dlat:.6f}, {dlon:.6f}",       "inline": True},
+            {"name": "Altitude",
+             "value": f"{drone.get('geodetic_altitude', 0):.1f} m MSL"
+                      f" / {drone.get('height_agl', 0):.1f} m AGL",
+             "inline": True},
+        ]
+
+        embed = {
+            "title":       f"\u26a0\ufe0f Proximity Alert: {drone.get('device_type', 'Unknown')}",
+            "description": f"Drone entered the {threshold} m alert radius.\n[View on map \U0001f5fa]({_map_url(drone)})",
+            "color":       0xda3633,
+            "fields":      fields,
+            "footer":      {"text": "DJI Drone Detection"},
+            "timestamp":   time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }
+
+        payload = json.dumps({"embeds": [embed]}).encode()
+        req = urllib.request.Request(
+            webhook,
+            data=payload,
+            headers={
+                "Content-Type": "application/json",
+                "User-Agent": "DJIDetect/1.0",
+            },
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=5):
+                pass
+        except urllib.error.HTTPError as e:
+            body = e.read().decode("utf-8", errors="replace")
+            print(f"[Discord] Proximity HTTP {e.code}: {body}")
+    except Exception as e:
+        print(f"[Discord] Proximity alert failed: {e}")
 _discord_last_sent: dict = {} # serial -> last alert wall time
 
 
@@ -465,6 +614,7 @@ def _send_tak(drone: dict):
 
     except Exception as e:
         print(f"[TAK] Send failed: {e}")
+        broadcast_error("TAK", f"Send failed: {e}")
 
 
 TAK_SENSOR_INTERVAL = 30  # seconds between sensor position beacons to TAK
@@ -509,6 +659,7 @@ def _send_tak_sensor():
                 sock.close()
     except Exception as e:
         print(f"[TAK] Sensor beacon failed: {e}")
+        broadcast_error("TAK", f"Sensor beacon failed: {e}")
 
 
 def _tak_sensor_beacon():
@@ -562,6 +713,25 @@ def _process_line(line: str):
 
     if send_discord:
         _io_executor.submit(_send_discord_alert, snapshot)
+
+    # Proximity alert — check distance from sensor, fire Discord on entry
+    if antsdr_config.get("proximity_alerts") and antsdr_config.get("proximity_discord"):
+        dlat = data.get("drone_lat", 0)
+        dlon = data.get("drone_lon", 0)
+        with data_lock:
+            slat = sensor_position.get("lat", 0)
+            slon = sensor_position.get("lon", 0)
+        if dlat and dlon and slat and slon:
+            dist = _haversine_m(slat, slon, dlat, dlon)
+            threshold = antsdr_config.get("proximity_distance_m", 1000)
+            inside = dist <= threshold
+            was_inside = _proximity_inside.get(sn, False)
+            _proximity_inside[sn] = inside
+            if inside and not was_inside:
+                brg = _bearing_deg(slat, slon, dlat, dlon)
+                _io_executor.submit(_send_discord_proximity_alert, snapshot, dist, brg)
+        else:
+            _proximity_inside.pop(sn, None)
 
     # TAK — every detection message
     _io_executor.submit(_send_tak, snapshot)
@@ -640,6 +810,7 @@ def antsdr_receiver():
         except Exception as e:
             _set_antsdr_connected(False)
             print(f"[ANTsdr] Error: {e} — retrying in 5s")
+            broadcast_error("ANTsdr", str(e))
             if not antsdr_reconnect.is_set():
                 time.sleep(5)
         finally:
@@ -659,6 +830,7 @@ def stale_cleaner():
             for serial in stale:
                 del drone_data[serial]
                 _discord_last_sent.pop(serial, None)
+                _proximity_inside.pop(serial, None)
                 broadcast({"type": "remove", "serial": serial})
 
 
@@ -732,6 +904,7 @@ def gpsd_poller(host: str, port: int):
 
         except Exception as e:
             print(f"[GPSD] Error: {e} — retrying in 10s")
+            broadcast_error("GPSD", str(e))
             time.sleep(10)
         finally:
             if sock:
@@ -825,6 +998,11 @@ def handle_config_get(start_response):
             "auto_fit":        antsdr_config["auto_fit"],
             "auto_track":      antsdr_config["auto_track"],
             "show_lines":      antsdr_config["show_lines"],
+            "range_rings":     antsdr_config["range_rings"],
+            "show_trails":     antsdr_config["show_trails"],
+            "proximity_alerts":     antsdr_config["proximity_alerts"],
+            "proximity_distance_m": antsdr_config["proximity_distance_m"],
+            "proximity_discord":    antsdr_config["proximity_discord"],
             "sensor_icon":            antsdr_config["sensor_icon"],
             "sensor_name":            antsdr_config["sensor_name"],
             "sensor_location_source": antsdr_config["sensor_location_source"],
@@ -871,6 +1049,11 @@ def handle_config_post(environ, start_response):
         antsdr_config["auto_fit"]        = bool(body.get("auto_fit",       antsdr_config["auto_fit"]))
         antsdr_config["auto_track"]      = bool(body.get("auto_track",     antsdr_config["auto_track"]))
         antsdr_config["show_lines"]      = bool(body.get("show_lines",     antsdr_config["show_lines"]))
+        antsdr_config["range_rings"]     = bool(body.get("range_rings",    antsdr_config["range_rings"]))
+        antsdr_config["show_trails"]     = bool(body.get("show_trails",    antsdr_config["show_trails"]))
+        antsdr_config["proximity_alerts"]     = bool(body.get("proximity_alerts",     antsdr_config["proximity_alerts"]))
+        antsdr_config["proximity_distance_m"] = max(10, int(body.get("proximity_distance_m", antsdr_config["proximity_distance_m"])))
+        antsdr_config["proximity_discord"]    = bool(body.get("proximity_discord",    antsdr_config["proximity_discord"]))
         antsdr_config["sensor_icon"]            = str(body.get("sensor_icon",            antsdr_config["sensor_icon"]))
         antsdr_config["sensor_name"]            = str(body.get("sensor_name",            antsdr_config["sensor_name"])).strip()
         antsdr_config["sensor_location_source"] = str(body.get("sensor_location_source", antsdr_config["sensor_location_source"]))
@@ -960,6 +1143,25 @@ def handle_history(environ, start_response):
         start_response("200 OK", [("Content-Type", "application/json"),
                                    ("Content-Length", str(len(body)))])
         return [body]
+    if method == "PUT":
+        try:
+            length = int(environ.get("CONTENT_LENGTH", 0))
+            raw = environ["wsgi.input"].read(length)
+            imported = json.loads(raw)
+            if not isinstance(imported, dict):
+                raise ValueError("Expected a JSON object")
+            with data_lock:
+                drone_history.update(imported)
+            save_history()
+            body = json.dumps({"ok": True, "count": len(imported)}).encode()
+            start_response("200 OK", [("Content-Type", "application/json"),
+                                       ("Content-Length", str(len(body)))])
+            return [body]
+        except Exception as e:
+            body = json.dumps({"ok": False, "error": str(e)}).encode()
+            start_response("400 Bad Request", [("Content-Type", "application/json"),
+                                                ("Content-Length", str(len(body)))])
+            return [body]
     start_response("405 Method Not Allowed", [("Content-Type", "text/plain")])
     return [b"Method Not Allowed"]
 
@@ -1023,6 +1225,136 @@ def handle_map_cache(environ, start_response):
     return [b"Method Not Allowed"]
 
 
+# --- Update helpers ---
+
+REPO_DIR = Path(__file__).parent
+
+
+def _git(*args, **kwargs):
+    """Run a git command in the repo directory and return (returncode, stdout, stderr)."""
+    result = subprocess.run(
+        ["git"] + list(args),
+        cwd=str(REPO_DIR),
+        capture_output=True,
+        text=True,
+        timeout=30,
+        **kwargs,
+    )
+    return result.returncode, result.stdout.strip(), result.stderr.strip()
+
+
+def handle_update_check(start_response):
+    """Fetch from origin and return list of changed files between HEAD and origin."""
+    try:
+        rc, out, err = _git("fetch", "origin")
+        if rc != 0:
+            body = json.dumps({"ok": False, "error": f"git fetch failed: {err}"}).encode()
+            start_response("500 Internal Server Error", [
+                ("Content-Type", "application/json"), ("Content-Length", str(len(body)))])
+            return [body]
+
+        # Determine the current branch
+        rc, branch, err = _git("rev-parse", "--abbrev-ref", "HEAD")
+        if rc != 0 or not branch:
+            branch = "master"
+
+        # Check if origin/branch exists
+        rc_ref, _, _ = _git("rev-parse", "--verify", f"origin/{branch}")
+        if rc_ref != 0:
+            body = json.dumps({"ok": True, "branch": branch, "files": [],
+                               "behind": 0, "current": "", "latest": "",
+                               "message": f"No remote branch origin/{branch} found."}).encode()
+            start_response("200 OK", [
+                ("Content-Type", "application/json"), ("Content-Length", str(len(body)))])
+            return [body]
+
+        # Count commits behind
+        rc, rev_list, _ = _git("rev-list", "--count", f"HEAD..origin/{branch}")
+        behind = int(rev_list) if rc == 0 and rev_list.isdigit() else 0
+
+        # Get current and latest commit hashes
+        _, current_hash, _ = _git("rev-parse", "--short", "HEAD")
+        _, latest_hash, _ = _git("rev-parse", "--short", f"origin/{branch}")
+
+        # Get latest commit message from remote
+        _, latest_msg, _ = _git("log", "-1", "--format=%s", f"origin/{branch}")
+
+        # List changed files
+        files = []
+        if behind > 0:
+            rc, diff_out, _ = _git("diff", "--name-status", f"HEAD..origin/{branch}")
+            if rc == 0 and diff_out:
+                for line in diff_out.splitlines():
+                    parts = line.split("\t", 1)
+                    if len(parts) == 2:
+                        status_code, filepath = parts
+                        status_map = {"A": "added", "M": "modified", "D": "deleted", "R": "renamed"}
+                        files.append({
+                            "status": status_map.get(status_code[0], status_code),
+                            "file": filepath,
+                        })
+
+        body = json.dumps({
+            "ok": True,
+            "branch": branch,
+            "behind": behind,
+            "current": current_hash,
+            "latest": latest_hash,
+            "latest_message": latest_msg,
+            "files": files,
+        }).encode()
+        start_response("200 OK", [
+            ("Content-Type", "application/json"), ("Content-Length", str(len(body)))])
+        return [body]
+
+    except Exception as e:
+        body = json.dumps({"ok": False, "error": str(e)}).encode()
+        start_response("500 Internal Server Error", [
+            ("Content-Type", "application/json"), ("Content-Length", str(len(body)))])
+        return [body]
+
+
+def handle_update_download(start_response):
+    """Pull latest changes from origin into the current branch."""
+    try:
+        rc, branch, _ = _git("rev-parse", "--abbrev-ref", "HEAD")
+        if rc != 0 or not branch:
+            branch = "master"
+
+        rc, out, err = _git("pull", "origin", branch)
+        if rc != 0:
+            body = json.dumps({"ok": False, "error": f"git pull failed: {err or out}"}).encode()
+            start_response("500 Internal Server Error", [
+                ("Content-Type", "application/json"), ("Content-Length", str(len(body)))])
+            return [body]
+
+        body = json.dumps({"ok": True, "output": out}).encode()
+        start_response("200 OK", [
+            ("Content-Type", "application/json"), ("Content-Length", str(len(body)))])
+        return [body]
+
+    except Exception as e:
+        body = json.dumps({"ok": False, "error": str(e)}).encode()
+        start_response("500 Internal Server Error", [
+            ("Content-Type", "application/json"), ("Content-Length", str(len(body)))])
+        return [body]
+
+
+def handle_update_restart(start_response):
+    """Restart the application by re-executing the current process."""
+    body = json.dumps({"ok": True, "message": "Restarting…"}).encode()
+    start_response("200 OK", [
+        ("Content-Type", "application/json"), ("Content-Length", str(len(body)))])
+
+    def _restart():
+        time.sleep(1)
+        python = sys.executable
+        os.execv(python, [python] + sys.argv)
+
+    threading.Thread(target=_restart, daemon=True).start()
+    return [body]
+
+
 # --- WSGI app ---
 
 def application(environ, start_response):
@@ -1038,6 +1370,15 @@ def application(environ, start_response):
 
     if path == "/history":
         return handle_history(environ, start_response)
+
+    if path == "/update-check" and method == "POST":
+        return handle_update_check(start_response)
+
+    if path == "/update-download" and method == "POST":
+        return handle_update_download(start_response)
+
+    if path == "/update-restart" and method == "POST":
+        return handle_update_restart(start_response)
 
     # Tile proxy: /tiles/{style}/{z}/{x}/{y}
     if path.startswith("/tiles/"):
@@ -1109,12 +1450,15 @@ if __name__ == "__main__":
         name="antsdr-receiver",
     ).start()
 
-    threading.Thread(
-        target=gpsd_poller,
-        kwargs={"host": args.gpsd_host, "port": args.gpsd_port},
-        daemon=True,
-        name="gpsd-poller",
-    ).start()
+    if antsdr_config.get("sensor_location_source", "gpsd") != "manual":
+        threading.Thread(
+            target=gpsd_poller,
+            kwargs={"host": args.gpsd_host, "port": args.gpsd_port},
+            daemon=True,
+            name="gpsd-poller",
+        ).start()
+    else:
+        print("[GPSD] Skipping gpsd poller — manual location is configured.")
 
     threading.Thread(
         target=stale_cleaner,
@@ -1135,4 +1479,4 @@ if __name__ == "__main__":
     ).start()
 
     print(f"Starting server at http://{args.host}:{args.port}")
-    serve(application, host=args.host, port=args.port, threads=8)
+    serve(application, host=args.host, port=args.port, threads=32)
