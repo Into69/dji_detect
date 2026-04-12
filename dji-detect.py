@@ -781,6 +781,36 @@ def _tcp_server_loop():
             pass
 
 
+def _kill_port_holders(port: str):
+    """Detect and kill other processes using the serial port (Linux only)."""
+    try:
+        result = subprocess.run(
+            ["fuser", port],
+            capture_output=True, text=True, timeout=5,
+        )
+        pids_str = result.stdout.strip()
+        if not pids_str:
+            return
+        my_pid = os.getpid()
+        pids = [int(p) for p in pids_str.split() if p.strip().isdigit()]
+        pids = [p for p in pids if p != my_pid]
+        if not pids:
+            return
+        for pid in pids:
+            try:
+                cmdline = Path(f"/proc/{pid}/cmdline").read_text().replace("\x00", " ").strip()
+            except Exception:
+                cmdline = "unknown"
+            print(f"[ANTsdr] Port {port} held by PID {pid} ({cmdline}) — killing")
+            broadcast_error("ANTsdr", f"Killing PID {pid} ({cmdline}) blocking {port}")
+            os.kill(pid, 9)
+        time.sleep(1)
+    except FileNotFoundError:
+        print("[ANTsdr] 'fuser' not available — cannot check port holders")
+    except Exception as e:
+        print(f"[ANTsdr] Failed to check/kill port holders: {e}")
+
+
 def _serial_loop():
     """Open serial port and read lines from ANTsdr."""
     if not _SERIAL_OK:
@@ -788,6 +818,7 @@ def _serial_loop():
     port = antsdr_config["serial_port"]
     baud = antsdr_config["serial_baud"]
     print(f"[ANTsdr] Serial {port} @ {baud}")
+    _kill_port_holders(port)
     with _serial.Serial(port, baud, timeout=1) as ser:
         _set_antsdr_connected(True)
         while not antsdr_reconnect.is_set():
@@ -1228,6 +1259,8 @@ def handle_map_cache(environ, start_response):
 # --- Update helpers ---
 
 REPO_DIR = Path(__file__).parent
+UPDATE_REMOTE = "https://github.com/Into69/dji_detect.git"
+UPDATE_BRANCH = "master"
 
 
 def _git(*args, **kwargs):
@@ -1237,15 +1270,46 @@ def _git(*args, **kwargs):
         cwd=str(REPO_DIR),
         capture_output=True,
         text=True,
-        timeout=30,
+        timeout=60,
         **kwargs,
     )
     return result.returncode, result.stdout.strip(), result.stderr.strip()
 
 
+def _ensure_git_repo():
+    """Initialize a git repo in REPO_DIR if one doesn't exist, attached to UPDATE_REMOTE."""
+    if (REPO_DIR / ".git").exists():
+        return True, ""
+    try:
+        rc, _, err = _git("init")
+        if rc != 0:
+            return False, f"git init failed: {err}"
+        rc, _, err = _git("remote", "add", "origin", UPDATE_REMOTE)
+        if rc != 0 and "already exists" not in err:
+            return False, f"git remote add failed: {err}"
+        rc, _, err = _git("fetch", "origin", UPDATE_BRANCH)
+        if rc != 0:
+            return False, f"git fetch failed: {err}"
+        _git("reset", f"origin/{UPDATE_BRANCH}")
+        rc, _, err = _git("checkout", "-f", "-B", UPDATE_BRANCH, f"origin/{UPDATE_BRANCH}")
+        if rc != 0:
+            return False, f"git checkout failed: {err}"
+        print(f"[Update] Initialized git repo tracking {UPDATE_REMOTE} ({UPDATE_BRANCH})")
+        return True, ""
+    except Exception as e:
+        return False, str(e)
+
+
 def handle_update_check(start_response):
     """Fetch from origin and return list of changed files between HEAD and origin."""
     try:
+        ok, err = _ensure_git_repo()
+        if not ok:
+            body = json.dumps({"ok": False, "error": err}).encode()
+            start_response("500 Internal Server Error", [
+                ("Content-Type", "application/json"), ("Content-Length", str(len(body)))])
+            return [body]
+
         rc, out, err = _git("fetch", "origin")
         if rc != 0:
             body = json.dumps({"ok": False, "error": f"git fetch failed: {err}"}).encode()
@@ -1317,9 +1381,16 @@ def handle_update_check(start_response):
 def handle_update_download(start_response):
     """Pull latest changes from origin into the current branch."""
     try:
+        ok, err = _ensure_git_repo()
+        if not ok:
+            body = json.dumps({"ok": False, "error": err}).encode()
+            start_response("500 Internal Server Error", [
+                ("Content-Type", "application/json"), ("Content-Length", str(len(body)))])
+            return [body]
+
         rc, branch, _ = _git("rev-parse", "--abbrev-ref", "HEAD")
         if rc != 0 or not branch:
-            branch = "master"
+            branch = UPDATE_BRANCH
 
         rc, out, err = _git("pull", "origin", branch)
         if rc != 0:

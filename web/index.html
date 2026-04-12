@@ -300,6 +300,19 @@
     .cfg-btn.success       { border-color: #3fb950; color: #3fb950; background: #1a2e1a; }
     .cfg-btn.success:hover { background: #23352e; }
 
+    /* ── GPSD status grid ── */
+    .gpsd-status-grid {
+      display: grid;
+      grid-template-columns: auto 1fr;
+      gap: 4px 12px;
+      font-size: 12px;
+    }
+    .gpsd-key { color: #8b949e; }
+    .gpsd-val { color: #e6edf3; font-weight: 500; font-variant-numeric: tabular-nums; }
+    .gpsd-val.ok    { color: #3fb950; }
+    .gpsd-val.warn  { color: #d29922; }
+    .gpsd-val.err   { color: #f85149; }
+
     /* ── Toast ── */
     #toast {
       position: fixed;
@@ -427,6 +440,20 @@
     }
     #error-badge.visible { display: inline-block; }
     #error-panel-toggle { font-size: 10px; color: #8b949e; line-height: 1; }
+    #error-clear-btn {
+      background: #21262d;
+      border: 1px solid #30363d;
+      color: #8b949e;
+      border-radius: 4px;
+      padding: 2px 8px;
+      font-size: 10px;
+      font-weight: 600;
+      cursor: pointer;
+      text-transform: uppercase;
+      letter-spacing: 0.4px;
+      transition: background 0.2s, border-color 0.2s, color 0.2s;
+    }
+    #error-clear-btn:hover { background: #30363d; border-color: #f85149; color: #f85149; }
     #error-panel-body {
       display: none;
       max-height: 140px;
@@ -716,6 +743,23 @@
         </div>
       </div>
     </div>
+
+    <div id="cfg-gpsd-status" class="cfg-section" style="display:none">
+      <div class="cfg-section-title">GPSD Status</div>
+      <div class="cfg-rows">
+        <div class="gpsd-status-grid">
+          <span class="gpsd-key">Status</span>     <span class="gpsd-val" id="gpsd-st-status">—</span>
+          <span class="gpsd-key">Fix</span>         <span class="gpsd-val" id="gpsd-st-fix">—</span>
+          <span class="gpsd-key">Latitude</span>    <span class="gpsd-val" id="gpsd-st-lat">—</span>
+          <span class="gpsd-key">Longitude</span>   <span class="gpsd-val" id="gpsd-st-lon">—</span>
+          <span class="gpsd-key">Altitude</span>    <span class="gpsd-val" id="gpsd-st-alt">—</span>
+          <span class="gpsd-key">Satellites</span>  <span class="gpsd-val" id="gpsd-st-sats">—</span>
+          <span class="gpsd-key">GPS time</span>    <span class="gpsd-val" id="gpsd-st-time">—</span>
+          <span class="gpsd-key">Last fix</span>    <span class="gpsd-val" id="gpsd-st-age">—</span>
+        </div>
+      </div>
+    </div>
+
     </div><!-- /cfg-pane-sensor -->
 
     <div class="cfg-tab-pane" id="cfg-pane-map">
@@ -886,6 +930,7 @@
     <div id="error-panel-header">
       <span id="error-panel-label">⚠ Errors</span>
       <span id="error-badge"></span>
+      <button id="error-clear-btn" title="Clear errors">Clear</button>
       <span id="error-panel-toggle">▲</span>
     </div>
     <div id="error-panel-body">
@@ -1378,9 +1423,36 @@ function upsertSensor(pos) {
   document.getElementById('sc-sats').textContent = satsStr;
   document.getElementById('sc-time').textContent = fmtGpsTime(pos.gps_time);
   document.getElementById('sc-age').textContent  = fmtAge(lastFixWallTime);
+
+  // Update GPSD status panel in settings
+  const stStatus = document.getElementById('gpsd-st-status');
+  const stFix    = document.getElementById('gpsd-st-fix');
+  if (hasfix) {
+    stStatus.textContent = 'Connected';
+    stStatus.className   = 'gpsd-val ok';
+  } else if (pos.mode === 1 || pos.sats_visible > 0) {
+    stStatus.textContent = 'Connected — no fix';
+    stStatus.className   = 'gpsd-val warn';
+  } else {
+    stStatus.textContent = 'Waiting for data…';
+    stStatus.className   = 'gpsd-val err';
+  }
+  stFix.textContent = fixLabel;
+  stFix.className   = 'gpsd-val' + (pos.mode >= 3 ? ' ok' : pos.mode === 2 ? ' warn' : ' err');
+  document.getElementById('gpsd-st-lat').textContent  = (pos.lat  != null && pos.lat  !== 0) ? pos.lat.toFixed(6)  : '—';
+  document.getElementById('gpsd-st-lon').textContent  = (pos.lon  != null && pos.lon  !== 0) ? pos.lon.toFixed(6)  : '—';
+  document.getElementById('gpsd-st-alt').textContent  = altStr;
+  document.getElementById('gpsd-st-sats').textContent = satsStr;
+  document.getElementById('gpsd-st-time').textContent = fmtGpsTime(pos.gps_time);
+  document.getElementById('gpsd-st-age').textContent  = fmtAge(lastFixWallTime);
 }
 
-setInterval(() => { if (lastFixWallTime) document.getElementById('sc-age').textContent = fmtAge(lastFixWallTime); }, 1000);
+setInterval(() => {
+  if (lastFixWallTime) {
+    document.getElementById('sc-age').textContent = fmtAge(lastFixWallTime);
+    document.getElementById('gpsd-st-age').textContent = fmtAge(lastFixWallTime);
+  }
+}, 1000);
 
 
 // ── Error panel ────────────────────────────────────────────────────────────
@@ -1390,11 +1462,20 @@ const errorBadge      = document.getElementById('error-badge');
 let   errorCount      = 0;
 const MAX_ERROR_ENTRIES = 200;
 
-document.getElementById('error-panel-header').addEventListener('click', () => {
+document.getElementById('error-panel-header').addEventListener('click', (e) => {
+  if (e.target.closest('#error-clear-btn')) return;
   errorPanel.classList.toggle('open');
   if (errorPanel.classList.contains('open')) {
     errorList.parentElement.scrollTop = errorList.parentElement.scrollHeight;
   }
+});
+
+document.getElementById('error-clear-btn').addEventListener('click', (e) => {
+  e.stopPropagation();
+  errorList.innerHTML = '';
+  errorCount = 0;
+  errorBadge.textContent = '';
+  errorBadge.classList.remove('visible');
 });
 
 function appendError(msg) {
@@ -1476,6 +1557,7 @@ function loadConfig() {
       if (cfg.sensor_location_source) {
         document.getElementById('cfg-sensor-location-source').value = cfg.sensor_location_source;
         document.getElementById('cfg-manual-location').style.display = cfg.sensor_location_source === 'manual' ? '' : 'none';
+        document.getElementById('cfg-gpsd-status').style.display = cfg.sensor_location_source === 'gpsd' ? '' : 'none';
       }
       if (cfg.sensor_lat) document.getElementById('cfg-sensor-lat').value = cfg.sensor_lat;
       if (cfg.sensor_lon) document.getElementById('cfg-sensor-lon').value = cfg.sensor_lon;
@@ -1555,6 +1637,7 @@ document.getElementById('cfg-conn-type').addEventListener('change', function() {
 document.getElementById('cfg-sensor-icon').addEventListener('change', function() { setSensorIcon(this.value); });
 document.getElementById('cfg-sensor-location-source').addEventListener('change', function() {
   document.getElementById('cfg-manual-location').style.display = this.value === 'manual' ? '' : 'none';
+  document.getElementById('cfg-gpsd-status').style.display = this.value === 'gpsd' ? '' : 'none';
 });
 document.getElementById('cfg-serial-refresh').addEventListener('click', () => loadSerialPorts(document.getElementById('cfg-serial-port').value));
 
