@@ -3,7 +3,7 @@ DJI Drone Detection Web App
 Receives drone data from ANTsdr via TCP, displays live positions on a map.
 """
 
-VERSION = "0.1.7"
+VERSION = "0.1.8"
 
 import argparse
 import collections
