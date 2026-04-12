@@ -1277,16 +1277,30 @@ def _git(*args, **kwargs):
 
 
 def _ensure_git_repo():
-    """Initialize a git repo in REPO_DIR if one doesn't exist, attached to UPDATE_REMOTE."""
-    if (REPO_DIR / ".git").exists():
+    """Initialize a git repo in REPO_DIR if one doesn't exist or is broken, attached to UPDATE_REMOTE."""
+    needs_setup = not (REPO_DIR / ".git").exists()
+    if not needs_setup:
+        rc, _, _ = _git("rev-parse", "HEAD")
+        if rc != 0:
+            needs_setup = True
+    if not needs_setup:
+        rc, _, _ = _git("remote", "get-url", "origin")
+        if rc != 0:
+            needs_setup = True
+    if not needs_setup:
         return True, ""
     try:
-        rc, _, err = _git("init")
+        if not (REPO_DIR / ".git").exists():
+            rc, _, err = _git("init")
+            if rc != 0:
+                return False, f"git init failed: {err}"
+        rc, remote_url, _ = _git("remote", "get-url", "origin")
         if rc != 0:
-            return False, f"git init failed: {err}"
-        rc, _, err = _git("remote", "add", "origin", UPDATE_REMOTE)
-        if rc != 0 and "already exists" not in err:
-            return False, f"git remote add failed: {err}"
+            rc, _, err = _git("remote", "add", "origin", UPDATE_REMOTE)
+            if rc != 0:
+                return False, f"git remote add failed: {err}"
+        elif remote_url != UPDATE_REMOTE:
+            _git("remote", "set-url", "origin", UPDATE_REMOTE)
         rc, _, err = _git("fetch", "origin", UPDATE_BRANCH)
         if rc != 0:
             return False, f"git fetch failed: {err}"
