@@ -879,13 +879,14 @@ def gpsd_poller(host: str, port: int):
             sock.connect((host, port))
             fh = sock.makefile("r")
 
-            # Consume VERSION welcome, then enable streaming
+            # Consume VERSION welcome, enable streaming, and request cached fix
             fh.readline()
-            sock.sendall(b'?WATCH={"enable":true,"json":true};\n')
+            sock.sendall(b'?WATCH={"enable":true,"json":true};?POLL;\n')
 
             latest_tpv: dict = {}
             latest_sats: list = []
             last_broadcast: float = 0.0
+            first_fix_sent: bool = False
 
             while True:
                 line = fh.readline()
@@ -907,9 +908,13 @@ def gpsd_poller(host: str, port: int):
                 elif cls == "SKY":
                     latest_sats = msg.get("satellites", [])
 
-                # Broadcast on interval using wall time, not sleep
+                # Broadcast immediately on first fix, then on interval
                 now = time.time()
-                if now - last_broadcast < GPSD_POLL_INTERVAL:
+                if first_fix_sent and now - last_broadcast < GPSD_POLL_INTERVAL:
+                    continue
+                if not first_fix_sent and latest_tpv.get("mode", 0) >= 2:
+                    first_fix_sent = True
+                elif not first_fix_sent:
                     continue
                 last_broadcast = now
 
