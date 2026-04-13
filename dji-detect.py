@@ -74,7 +74,6 @@ _history_last_saved: float = 0.0     # wall time of last history file write
 sse_lock = threading.Lock()
 
 STALE_TIMEOUT = 30          # seconds before a drone is considered gone
-GPSD_POLL_INTERVAL = 10     # seconds between gpsd broadcasts
 TEMPLATE_DIR  = Path(__file__).parent / "web"
 CONFIG_FILE   = Path(__file__).parent / "dd-config.json"
 HISTORY_FILE  = Path(__file__).parent / "history.txt"
@@ -868,7 +867,7 @@ def stale_cleaner():
 # --- gpsd poller ---
 
 def gpsd_poller(host: str, port: int):
-    """Stream TPV/SKY messages from gpsd and broadcast every GPSD_POLL_INTERVAL seconds."""
+    """Stream TPV/SKY messages from gpsd like cgps — broadcast every update."""
     global sensor_position
     last_fix_wall_time: float = 0.0
     print(f"[GPSD] Connecting to {host}:{port}")
@@ -879,14 +878,12 @@ def gpsd_poller(host: str, port: int):
             sock.connect((host, port))
             fh = sock.makefile("r")
 
-            # Consume VERSION welcome, enable streaming, and request cached fix
+            # Consume VERSION welcome, then enable JSON streaming (like cgps)
             fh.readline()
-            sock.sendall(b'?WATCH={"enable":true,"json":true};?POLL;\n')
+            sock.sendall(b'?WATCH={"enable":true,"json":true}\n')
 
             latest_tpv: dict = {}
             latest_sats: list = []
-            last_broadcast: float = 0.0
-            first_fix_sent: bool = False
 
             while True:
                 line = fh.readline()
@@ -904,20 +901,12 @@ def gpsd_poller(host: str, port: int):
                     latest_tpv = msg
                     if msg.get("mode", 0) >= 2:
                         last_fix_wall_time = time.time()
-
                 elif cls == "SKY":
                     latest_sats = msg.get("satellites", [])
-
-                # Broadcast immediately on first fix, then on interval
-                now = time.time()
-                if first_fix_sent and now - last_broadcast < GPSD_POLL_INTERVAL:
+                else:
                     continue
-                if not first_fix_sent and latest_tpv.get("mode", 0) >= 2:
-                    first_fix_sent = True
-                elif not first_fix_sent:
-                    continue
-                last_broadcast = now
 
+                # Broadcast on every TPV/SKY update (like cgps)
                 mode    = latest_tpv.get("mode", 0)
                 has_fix = mode >= 2
                 # gpsd 3.20+ renamed alt -> altMSL; support both
