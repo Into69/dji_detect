@@ -637,7 +637,7 @@ def _send_tak_sensor():
             uid=f"DJI-Detect-Sensor-{name.replace(' ', '_')}",
             cot_type="a-f-G-U-C",
             lat=pos["lat"], lon=pos["lon"],
-            hae=pos.get("alt", 0),
+            hae=pos.get("alt") or 0,
             callsign=name,
             remarks=f"DJI Detect sensor — {name}",
             stale_secs=90,
