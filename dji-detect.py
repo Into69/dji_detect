@@ -527,6 +527,9 @@ def _cot_time(t: float, offset: float = 0.0) -> str:
 
 def _build_cot_event(uid: str, cot_type: str, lat: float, lon: float, hae: float,
                      callsign: str, remarks: str, stale_secs: int = 60) -> bytes:
+    lat = lat or 0.0
+    lon = lon or 0.0
+    hae = hae or 0.0
     now = time.time()
     xml = (
         "<?xml version='1.0' standalone='yes'?>"
