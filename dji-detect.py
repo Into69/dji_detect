@@ -46,6 +46,8 @@ antsdr_config: dict = {
     "auto_track":      False,
     "show_lines":      True,
     "range_rings":     False,
+    "range_ring_color":   "#3fb950",
+    "range_ring_opacity": 0.7,
     "show_trails":     True,
     "proximity_alerts":   False,
     "proximity_distance_m": 1000,
@@ -108,6 +110,8 @@ def load_config():
             "auto_track":       ("auto_track",        bool),
             "show_lines":       ("show_lines",        bool),
             "range_rings":      ("range_rings",       bool),
+            "range_ring_color":   ("range_ring_color",   str),
+            "range_ring_opacity": ("range_ring_opacity", float),
             "show_trails":      ("show_trails",       bool),
             "proximity_alerts":     ("proximity_alerts",     bool),
             "proximity_distance_m": ("proximity_distance_m", int),
@@ -144,6 +148,8 @@ def save_config():
         "auto_track":      antsdr_config["auto_track"],
         "show_lines":      antsdr_config["show_lines"],
         "range_rings":     antsdr_config["range_rings"],
+        "range_ring_color":   antsdr_config["range_ring_color"],
+        "range_ring_opacity": antsdr_config["range_ring_opacity"],
         "show_trails":     antsdr_config["show_trails"],
         "proximity_alerts":     antsdr_config["proximity_alerts"],
         "proximity_distance_m": antsdr_config["proximity_distance_m"],
@@ -1027,6 +1033,8 @@ def handle_config_get(start_response):
             "auto_track":      antsdr_config["auto_track"],
             "show_lines":      antsdr_config["show_lines"],
             "range_rings":     antsdr_config["range_rings"],
+            "range_ring_color":   antsdr_config["range_ring_color"],
+            "range_ring_opacity": antsdr_config["range_ring_opacity"],
             "show_trails":     antsdr_config["show_trails"],
             "proximity_alerts":     antsdr_config["proximity_alerts"],
             "proximity_distance_m": antsdr_config["proximity_distance_m"],
@@ -1078,6 +1086,8 @@ def handle_config_post(environ, start_response):
         antsdr_config["auto_track"]      = bool(body.get("auto_track",     antsdr_config["auto_track"]))
         antsdr_config["show_lines"]      = bool(body.get("show_lines",     antsdr_config["show_lines"]))
         antsdr_config["range_rings"]     = bool(body.get("range_rings",    antsdr_config["range_rings"]))
+        antsdr_config["range_ring_color"]   = str(body.get("range_ring_color",   antsdr_config["range_ring_color"]))
+        antsdr_config["range_ring_opacity"] = max(0.0, min(1.0, float(body.get("range_ring_opacity", antsdr_config["range_ring_opacity"]))))
         antsdr_config["show_trails"]     = bool(body.get("show_trails",    antsdr_config["show_trails"]))
         antsdr_config["proximity_alerts"]     = bool(body.get("proximity_alerts",     antsdr_config["proximity_alerts"]))
         antsdr_config["proximity_distance_m"] = max(10, int(body.get("proximity_distance_m", antsdr_config["proximity_distance_m"])))

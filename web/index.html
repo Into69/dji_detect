@@ -787,6 +787,18 @@
           <button class="cfg-btn active" id="btn-lines">Lines: ON</button>
           <button class="cfg-btn" id="btn-rings">Range Rings: OFF</button>
         </div>
+        <div id="cfg-rings-controls" style="display:none">
+          <div class="cfg-row">
+            <label>Ring color</label>
+            <input id="cfg-ring-color" type="color" value="#3fb950" style="width:40px;height:28px;border:1px solid #30363d;background:#0d1117;border-radius:5px;cursor:pointer" />
+            <span id="cfg-ring-color-hex" style="font-size:11px;color:#8b949e;font-family:monospace">#3fb950</span>
+          </div>
+          <div class="cfg-row">
+            <label>Ring opacity</label>
+            <input id="cfg-ring-opacity" type="range" min="0" max="1" step="0.05" value="0.7" style="flex:1" />
+            <span id="cfg-ring-opacity-val" style="font-size:11px;color:#8b949e;min-width:32px;text-align:right">70%</span>
+          </div>
+        </div>
         <div class="cfg-btn-row">
           <button class="cfg-btn active" id="btn-trails">Trails: ON</button>
           <button class="cfg-btn danger" id="btn-clear">Clear drones</button>
@@ -1158,6 +1170,9 @@ function clearRangeRings() {
   rangeRingLayers = [];
 }
 
+let rangeRingColor   = '#3fb950';
+let rangeRingOpacity = 0.7;
+
 function updateRangeRings() {
   clearRangeRings();
   if (!rangeRings || !sensorMarker) return;
@@ -1165,9 +1180,9 @@ function updateRangeRings() {
   for (const r of RANGE_RING_RADII_M) {
     const circle = L.circle(center, {
       radius: r,
-      color: '#3fb950',
+      color: rangeRingColor,
       weight: 1,
-      opacity: 0.7,
+      opacity: rangeRingOpacity,
       fill: false,
       interactive: false,
     }).addTo(map);
@@ -1566,6 +1581,17 @@ function loadConfig() {
       autoTrack  = !!cfg.auto_track;
       showLines  = !!cfg.show_lines;
       rangeRings = !!cfg.range_rings;
+      if (cfg.range_ring_color) {
+        rangeRingColor = cfg.range_ring_color;
+        document.getElementById('cfg-ring-color').value = cfg.range_ring_color;
+        document.getElementById('cfg-ring-color-hex').textContent = cfg.range_ring_color;
+      }
+      if (cfg.range_ring_opacity != null) {
+        rangeRingOpacity = parseFloat(cfg.range_ring_opacity);
+        document.getElementById('cfg-ring-opacity').value = rangeRingOpacity;
+        document.getElementById('cfg-ring-opacity-val').textContent = Math.round(rangeRingOpacity * 100) + '%';
+      }
+      document.getElementById('cfg-rings-controls').style.display = rangeRings ? '' : 'none';
       showTrails = cfg.show_trails !== undefined ? !!cfg.show_trails : true;
       proximityEnabled  = !!cfg.proximity_alerts;
       proximityDistance = parseInt(cfg.proximity_distance_m, 10) || 1000;
@@ -1652,6 +1678,8 @@ function postConfig(reconnect) {
     auto_track:       autoTrack,
     show_lines:       showLines,
     range_rings:      rangeRings,
+    range_ring_color:   rangeRingColor,
+    range_ring_opacity: rangeRingOpacity,
     show_trails:      showTrails,
     proximity_alerts:     document.getElementById('cfg-proximity-enabled').checked,
     proximity_distance_m: parseInt(document.getElementById('cfg-proximity-distance').value, 10) || 1000,
@@ -1765,6 +1793,7 @@ document.getElementById('btn-rings').addEventListener('click', function () {
   rangeRings = !rangeRings;
   this.textContent = 'Range Rings: ' + (rangeRings ? 'ON' : 'OFF');
   this.classList.toggle('active', rangeRings);
+  document.getElementById('cfg-rings-controls').style.display = rangeRings ? '' : 'none';
   if (rangeRings) {
     if (sensorMarker) {
       map.setView(sensorMarker.getLatLng(), map.getZoom());
@@ -1775,6 +1804,18 @@ document.getElementById('btn-rings').addEventListener('click', function () {
   } else {
     clearRangeRings();
   }
+});
+
+document.getElementById('cfg-ring-color').addEventListener('input', function () {
+  rangeRingColor = this.value;
+  document.getElementById('cfg-ring-color-hex').textContent = this.value;
+  if (rangeRings) updateRangeRings();
+});
+
+document.getElementById('cfg-ring-opacity').addEventListener('input', function () {
+  rangeRingOpacity = parseFloat(this.value);
+  document.getElementById('cfg-ring-opacity-val').textContent = Math.round(rangeRingOpacity * 100) + '%';
+  if (rangeRings) updateRangeRings();
 });
 
 document.getElementById('btn-clear').addEventListener('click', () => {
