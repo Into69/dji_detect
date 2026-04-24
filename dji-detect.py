@@ -315,6 +315,8 @@ def _parse_antsdr_line(line: str) -> dict | None:
         spd_n            = flt(spd_parts[1]) / 100.0 if len(spd_parts) > 1 else 0.0
         spd_u            = flt(spd_parts[2]) / 100.0 if len(spd_parts) > 2 else 0.0
         horizontal_speed = math.sqrt(spd_e ** 2 + spd_n ** 2)
+        # Course over ground in degrees true (0=N, 90=E). atan2(east, north) → bearing.
+        course = (math.degrees(math.atan2(spd_e, spd_n)) + 360.0) % 360.0 if horizontal_speed > 0.1 else 0.0
 
         # O4 encrypted drone: serial is derived from hash in field4 parentheses
         if protocol == "4":
@@ -327,6 +329,7 @@ def _parse_antsdr_line(line: str) -> dict | None:
             model  = field4[:field4.rfind("(")].strip() if "(" in field4 else field4
             serial = field5 if len(field5) >= 5 else "unknown"
 
+        drone_lat, drone_lon = safe_latlon(drone_lat, drone_lon)
         pilot_lat, pilot_lon = safe_latlon(pilot_lat, pilot_lon)
         home_lat,  home_lon  = safe_latlon(home_lat,  home_lon)
 
@@ -345,6 +348,7 @@ def _parse_antsdr_line(line: str) -> dict | None:
             "height_agl":         height_agl,
             "horizontal_speed":   horizontal_speed,
             "vertical_speed":     spd_u,
+            "course":             course,
             "last_seen":          time.time(),
         }
     except (ValueError, IndexError) as e:
@@ -558,11 +562,15 @@ def _cot_time(t: float, offset: float = 0.0) -> str:
 
 
 def _build_cot_event(uid: str, cot_type: str, lat: float, lon: float, hae: float,
-                     callsign: str, remarks: str, stale_secs: int = 60) -> bytes:
+                     callsign: str, remarks: str, stale_secs: int = 30,
+                     course: float | None = None, speed: float | None = None) -> bytes:
     lat = lat or 0.0
     lon = lon or 0.0
     hae = hae or 0.0
     now = time.time()
+    track_xml = ""
+    if course is not None and speed is not None:
+        track_xml = f"<track course='{course:.1f}' speed='{speed:.2f}'/>"
     xml = (
         "<?xml version='1.0' standalone='yes'?>"
         f"<event version='2.0' uid='{uid}' type='{cot_type}'"
@@ -572,6 +580,7 @@ def _build_cot_event(uid: str, cot_type: str, lat: float, lon: float, hae: float
         f" ce='9999999.0' le='9999999.0'/>"
         f"<detail>"
         f"<contact callsign='{callsign}'/>"
+        f"{track_xml}"
         f"<remarks>{remarks}</remarks>"
         f"</detail>"
         f"</event>"
@@ -607,13 +616,17 @@ def _send_tak(drone: dict):
             f"RSSI:{drone.get('rssi', 0)}dBm Freq:{drone.get('freq', 0):.1f}MHz"
         )
 
-        events = [
-            _build_cot_event(
+        events = []
+        # Skip the drone CoT entirely if there's no valid GPS fix — otherwise
+        # TAK draws a marker on Null Island (0, 0).
+        if dlat and dlon:
+            events.append(_build_cot_event(
                 uid=f"DJI-{serial}", cot_type="a-u-A-M-F-Q",
                 lat=dlat, lon=dlon, hae=alt,
                 callsign=f"DJI-{tag}", remarks=remarks,
-            ),
-        ]
+                course=drone.get("course", 0.0),
+                speed=drone.get("horizontal_speed", 0.0),
+            ))
         if plat or plon:
             events.append(_build_cot_event(
                 uid=f"DJI-{serial}-pilot", cot_type="a-u-G-U-C-I",
@@ -628,6 +641,8 @@ def _send_tak(drone: dict):
                 callsign=f"Home-{tag}",
                 remarks=f"Home point of {model} ({serial})",
             ))
+        if not events:
+            return
 
         if proto == "udp":
             sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
