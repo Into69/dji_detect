@@ -341,6 +341,92 @@
       100% { opacity: 0; }
     }
 
+    /* ── Proximity popup ── */
+    #prox-popup-container {
+      position: fixed;
+      top: 16px;
+      right: 16px;
+      z-index: 3000;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      max-width: 340px;
+      max-height: calc(100vh - 32px);
+      overflow-y: auto;
+      pointer-events: none;
+      scrollbar-width: thin;
+    }
+    #prox-popup-container::-webkit-scrollbar { width: 6px; }
+    #prox-popup-container::-webkit-scrollbar-thumb { background: #30363d; border-radius: 3px; }
+    .prox-popup {
+      background: #21262d;
+      border: 1px solid #f85149;
+      border-radius: 8px;
+      box-shadow: 0 6px 20px rgba(0,0,0,0.6);
+      color: #e6edf3;
+      font-size: 12px;
+      overflow: hidden;
+      pointer-events: auto;
+      animation: prox-pop-in 0.25s ease forwards;
+    }
+    @keyframes prox-pop-in {
+      from { opacity: 0; transform: translateX(20px); }
+      to   { opacity: 1; transform: translateX(0); }
+    }
+    .prox-popup.hide {
+      animation: prox-pop-out 0.2s ease forwards;
+    }
+    @keyframes prox-pop-out {
+      to { opacity: 0; transform: translateX(20px); }
+    }
+    .prox-popup-head {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 9px 12px;
+      background: rgba(248,81,73,0.12);
+      border-bottom: 1px solid #30363d;
+    }
+    .prox-popup-title {
+      flex: 1;
+      font-weight: 600;
+      color: #f85149;
+      font-size: 13px;
+    }
+    .prox-popup-close {
+      background: transparent;
+      border: none;
+      color: #8b949e;
+      cursor: pointer;
+      font-size: 16px;
+      line-height: 1;
+      padding: 0 2px;
+    }
+    .prox-popup-close:hover { color: #e6edf3; }
+    .prox-popup-body {
+      padding: 10px 12px;
+    }
+    .prox-popup-row {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 2px 0;
+    }
+    .prox-popup-key { color: #8b949e; }
+    .prox-popup-val { color: #e6edf3; font-variant-numeric: tabular-nums; }
+    .prox-popup-progress {
+      height: 3px;
+      background: #30363d;
+      overflow: hidden;
+    }
+    .prox-popup-progress-bar {
+      height: 100%;
+      background: #f85149;
+      width: 100%;
+      transform-origin: left center;
+      transition: transform linear;
+    }
+
     /* ── Range ring labels ── */
     .range-ring-label {
       background: transparent;
@@ -841,6 +927,10 @@
           <label>Discord notify</label>
           <input id="cfg-proximity-discord" type="checkbox" />
         </div>
+        <div class="cfg-row">
+          <label>Cooldown</label>
+          <input id="cfg-proximity-cooldown" class="cfg-input" type="number" min="0" step="10" placeholder="60" />
+        </div>
       </div>
     </div>
 
@@ -971,6 +1061,7 @@
 </div>
 <div id="map"></div>
 <div id="toast"></div>
+<div id="prox-popup-container"></div>
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script>
@@ -1309,10 +1400,74 @@ function beep() {
   } catch {}
 }
 
-function fireProximityAlert(serial, dist) {
+const PROX_POPUP_DURATION_MS = 15000;
+const _proxPopups = {};   // serial -> { el, timer }
+
+function showProximityPopup(d, dist, brg) {
+  const serial = d.serial_number;
+  const container = document.getElementById('prox-popup-container');
+  if (!container) return;
+
+  if (_proxPopups[serial]) {
+    clearTimeout(_proxPopups[serial].timer);
+    _proxPopups[serial].el.remove();
+    delete _proxPopups[serial];
+  }
+
+  const alt  = (d.geodetic_altitude != null) ? d.geodetic_altitude.toFixed(1) + ' m' : 'N/A';
+  const hagl = (d.height_agl != null) ? d.height_agl.toFixed(1) + ' m' : 'N/A';
+  const spd  = (d.horizontal_speed != null) ? d.horizontal_speed.toFixed(1) + ' m/s' : 'N/A';
+  const rssi = (d.rssi != null) ? d.rssi + ' dBm' : 'N/A';
+  const bearStr = (brg != null) ? `${Math.round(brg)}° ${compassPoint(brg)}` : 'N/A';
+
+  const el = document.createElement('div');
+  el.className = 'prox-popup';
+  el.innerHTML = `
+    <div class="prox-popup-head">
+      <div class="prox-popup-title">⚠ Proximity alert</div>
+      <button class="prox-popup-close" aria-label="Close">×</button>
+    </div>
+    <div class="prox-popup-body">
+      <div class="prox-popup-row"><span class="prox-popup-key">Drone</span><span class="prox-popup-val">${escHtml(serial)}</span></div>
+      <div class="prox-popup-row"><span class="prox-popup-key">Model</span><span class="prox-popup-val">${escHtml(d.device_type || 'Unknown')}</span></div>
+      <div class="prox-popup-row"><span class="prox-popup-key">Range</span><span class="prox-popup-val">${fmtDistance(dist)} @ ${bearStr}</span></div>
+      <div class="prox-popup-row"><span class="prox-popup-key">Altitude</span><span class="prox-popup-val">${alt}</span></div>
+      <div class="prox-popup-row"><span class="prox-popup-key">Height AGL</span><span class="prox-popup-val">${hagl}</span></div>
+      <div class="prox-popup-row"><span class="prox-popup-key">Speed</span><span class="prox-popup-val">${spd}</span></div>
+      <div class="prox-popup-row"><span class="prox-popup-key">RSSI</span><span class="prox-popup-val">${rssi}</span></div>
+    </div>
+    <div class="prox-popup-progress"><div class="prox-popup-progress-bar"></div></div>
+  `;
+  container.appendChild(el);
+
+  const bar = el.querySelector('.prox-popup-progress-bar');
+  const dismiss = () => {
+    if (!_proxPopups[serial]) return;
+    clearTimeout(_proxPopups[serial].timer);
+    el.classList.add('hide');
+    setTimeout(() => { el.remove(); }, 200);
+    delete _proxPopups[serial];
+  };
+  el.querySelector('.prox-popup-close').addEventListener('click', dismiss);
+
+  bar.style.transition = `transform ${PROX_POPUP_DURATION_MS}ms linear`;
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => { bar.style.transform = 'scaleX(0)'; });
+  });
+
+  _proxPopups[serial] = {
+    el,
+    timer: setTimeout(dismiss, PROX_POPUP_DURATION_MS),
+  };
+}
+
+function fireProximityAlert(droneOrSerial, dist, brg) {
+  const d = (typeof droneOrSerial === 'string') ? { serial_number: droneOrSerial } : droneOrSerial;
+  const serial = d.serial_number;
   const msg = `⚠ ${serial} within ${fmtDistance(dist)} of sensor`;
   showToast(msg, 'err');
   beep();
+  showProximityPopup(d, dist, brg);
   if ('Notification' in window && Notification.permission === 'granted') {
     try { new Notification('Drone proximity alert', { body: msg }); } catch {}
   }
@@ -1327,7 +1482,10 @@ function checkProximity(e) {
   const s  = sensorMarker.getLatLng();
   const dist = haversineMeters(s.lat, s.lng, ll.lat, ll.lng);
   const inside = dist <= proximityDistance;
-  if (inside && !e.insideProximity) fireProximityAlert(e.data.serial_number, dist);
+  if (inside && !e.insideProximity) {
+    const brg = bearingDeg(s.lat, s.lng, ll.lat, ll.lng);
+    fireProximityAlert(e.data, dist, brg);
+  }
   e.insideProximity = inside;
 }
 
@@ -1673,6 +1831,7 @@ function loadConfig() {
       document.getElementById('cfg-proximity-enabled').checked  = proximityEnabled;
       document.getElementById('cfg-proximity-distance').value   = proximityDistance;
       document.getElementById('cfg-proximity-discord').checked  = !!cfg.proximity_discord;
+      document.getElementById('cfg-proximity-cooldown').value   = (cfg.proximity_cooldown_s != null) ? cfg.proximity_cooldown_s : 60;
       updateLinesVisibility();
       updateTrailsVisibility();
       if (rangeRings && sensorMarker) {
@@ -1751,6 +1910,7 @@ function postConfig(reconnect) {
     proximity_alerts:     document.getElementById('cfg-proximity-enabled').checked,
     proximity_distance_m: parseInt(document.getElementById('cfg-proximity-distance').value, 10) || 1000,
     proximity_discord:    document.getElementById('cfg-proximity-discord').checked,
+    proximity_cooldown_s: Math.max(0, parseInt(document.getElementById('cfg-proximity-cooldown').value, 10) || 0),
     sensor_icon:             document.getElementById('cfg-sensor-icon').value,
     sensor_name:             document.getElementById('cfg-sensor-name').value.trim() || 'Sensor',
     sensor_location_source:  document.getElementById('cfg-sensor-location-source').value,

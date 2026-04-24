@@ -3,7 +3,7 @@ DJI Drone Detection Web App
 Receives drone data from ANTsdr via TCP, displays live positions on a map.
 """
 
-VERSION = "0.1.8"
+VERSION = "0.1.9"
 
 import argparse
 import collections
@@ -52,6 +52,7 @@ antsdr_config: dict = {
     "proximity_alerts":   False,
     "proximity_distance_m": 1000,
     "proximity_discord":  False,
+    "proximity_cooldown_s": 60,
     "sensor_icon":             "📡",
     "sensor_name":             "Sensor",
     "sensor_location_source":  "gpsd",   # "gpsd" or "manual"
@@ -126,6 +127,7 @@ def load_config():
             "proximity_alerts":     ("proximity_alerts",     bool),
             "proximity_distance_m": ("proximity_distance_m", int),
             "proximity_discord":    ("proximity_discord",    bool),
+            "proximity_cooldown_s": ("proximity_cooldown_s", int),
             "sensor_icon":             ("sensor_icon",            str),
             "sensor_name":             ("sensor_name",            str),
             "sensor_location_source":  ("sensor_location_source", str),
@@ -164,6 +166,7 @@ def save_config():
         "proximity_alerts":     antsdr_config["proximity_alerts"],
         "proximity_distance_m": antsdr_config["proximity_distance_m"],
         "proximity_discord":    antsdr_config["proximity_discord"],
+        "proximity_cooldown_s": antsdr_config["proximity_cooldown_s"],
         "sensor_icon":            antsdr_config["sensor_icon"],
         "sensor_name":            antsdr_config["sensor_name"],
         "sensor_location_source": antsdr_config["sensor_location_source"],
@@ -463,6 +466,8 @@ DISCORD_ALERT_INTERVAL = 30   # seconds between repeated Discord alerts per dron
 # Per-serial latch: True while drone is currently inside the proximity radius.
 # Resets when the drone leaves the radius (or goes stale) so re-entries fire again.
 _proximity_inside: dict = {}
+# Per-serial timestamp of last proximity alert sent — used to enforce cooldown.
+_proximity_last_alert: dict = {}
 
 
 def _haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -743,7 +748,7 @@ def _process_line(line: str):
     if send_discord:
         _io_executor.submit(_send_discord_alert, snapshot)
 
-    # Proximity alert — check distance from sensor, fire Discord on entry
+    # Proximity alert — fire on entry, then re-fire while inside no more than once per cooldown.
     if antsdr_config.get("proximity_alerts") and antsdr_config.get("proximity_discord"):
         dlat = data.get("drone_lat", 0)
         dlon = data.get("drone_lon", 0)
@@ -756,11 +761,17 @@ def _process_line(line: str):
             inside = dist <= threshold
             was_inside = _proximity_inside.get(sn, False)
             _proximity_inside[sn] = inside
-            if inside and not was_inside:
-                brg = _bearing_deg(slat, slon, dlat, dlon)
-                _io_executor.submit(_send_discord_proximity_alert, snapshot, dist, brg)
+            if inside:
+                cooldown = max(0, int(antsdr_config.get("proximity_cooldown_s", 60)))
+                now = time.time()
+                last = _proximity_last_alert.get(sn, 0)
+                if not was_inside or (now - last) >= cooldown:
+                    _proximity_last_alert[sn] = now
+                    brg = _bearing_deg(slat, slon, dlat, dlon)
+                    _io_executor.submit(_send_discord_proximity_alert, snapshot, dist, brg)
         else:
             _proximity_inside.pop(sn, None)
+            _proximity_last_alert.pop(sn, None)
 
     # TAK — every detection message
     _io_executor.submit(_send_tak, snapshot)
@@ -912,6 +923,7 @@ def stale_cleaner():
                 del drone_data[serial]
                 _discord_last_sent.pop(serial, None)
                 _proximity_inside.pop(serial, None)
+                _proximity_last_alert.pop(serial, None)
                 broadcast({"type": "remove", "serial": serial})
 
 
@@ -1083,6 +1095,7 @@ def handle_config_get(start_response):
             "proximity_alerts":     antsdr_config["proximity_alerts"],
             "proximity_distance_m": antsdr_config["proximity_distance_m"],
             "proximity_discord":    antsdr_config["proximity_discord"],
+            "proximity_cooldown_s": antsdr_config["proximity_cooldown_s"],
             "sensor_icon":            antsdr_config["sensor_icon"],
             "sensor_name":            antsdr_config["sensor_name"],
             "sensor_location_source": antsdr_config["sensor_location_source"],
@@ -1136,6 +1149,7 @@ def handle_config_post(environ, start_response):
         antsdr_config["proximity_alerts"]     = bool(body.get("proximity_alerts",     antsdr_config["proximity_alerts"]))
         antsdr_config["proximity_distance_m"] = max(10, int(body.get("proximity_distance_m", antsdr_config["proximity_distance_m"])))
         antsdr_config["proximity_discord"]    = bool(body.get("proximity_discord",    antsdr_config["proximity_discord"]))
+        antsdr_config["proximity_cooldown_s"] = max(0, int(body.get("proximity_cooldown_s", antsdr_config["proximity_cooldown_s"])))
         antsdr_config["sensor_icon"]            = str(body.get("sensor_icon",            antsdr_config["sensor_icon"]))
         antsdr_config["sensor_name"]            = str(body.get("sensor_name",            antsdr_config["sensor_name"])).strip()
         antsdr_config["sensor_location_source"] = str(body.get("sensor_location_source", antsdr_config["sensor_location_source"]))
