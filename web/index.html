@@ -135,6 +135,8 @@
     .history-serial { font-size: 11px; font-weight: 600; color: #58a6ff; word-break: break-all; }
     .history-model  { font-size: 12px; color: #8b949e; margin-bottom: 6px; }
     .history-last-seen { margin-left: auto; font-size: 10px; color: #6e7681; white-space: nowrap; }
+    .history-live { font-size: 9px; font-weight: 700; color: #3fb950; letter-spacing: 0.5px; padding: 1px 5px; border: 1px solid #238636; border-radius: 3px; background: rgba(63,185,80,0.08); }
+    .history-card.live { border-left: 2px solid #3fb950; }
     .history-grid {
       display: grid;
       grid-template-columns: auto 1fr;
@@ -2182,7 +2184,7 @@ function loadHistory() {
   fetch('/history')
     .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
     .then(data => {
-      _historyEntries = Object.values(data).filter(d => !drones[d.serial_number]);
+      _historyEntries = Object.values(data);
       if (!_historyEntries.length) {
         historyCardsEl.innerHTML = '<div class="no-drones"><div class="icon">📋</div>No history yet…</div>';
         historyToolbar.style.display = 'none';
@@ -2211,13 +2213,16 @@ function loadHistory() {
           `<span class="hk">${k}</span><span class="hv">${v}</span>`
         ).join('');
 
+        const isLive = !!drones[d.serial_number];
+        const liveBadge = isLive ? '<span class="history-live">● LIVE</span>' : '';
         const card = document.createElement('div');
-        card.className = 'history-card';
+        card.className = 'history-card' + (isLive ? ' live' : '');
         card.style.cursor = 'pointer';
         card.innerHTML = `
           <div class="history-card-header">
             <span class="drone-icon-sm">🛸</span>
             <span class="history-serial">${escHtml(d.serial_number)}</span>
+            ${liveBadge}
             <span class="history-last-seen">${fmtTimestamp(d.last_seen)}</span>
           </div>
           <div class="history-model">${escHtml(d.device_type || 'Unknown model')}</div>
