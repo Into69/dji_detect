@@ -231,7 +231,7 @@ def _send_discord_error(source: str, message: str):
             "title":     f"⚠ Error [{source}]",
             "description": message,
             "color":     0xda3633,
-            "footer":    {"text": "DJI Drone Detection"},
+            "footer":    {"text": f"DJI Drone Detection — {antsdr_config.get('sensor_name', 'Sensor').strip() or 'Sensor'}"},
             "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         }
         payload = json.dumps({"embeds": [embed]}).encode()
@@ -434,7 +434,7 @@ def _send_discord_alert(drone: dict):
             "description": f"[View on map \U0001f5fa]({_map_url(drone)})",
             "color":       0xf0883e,
             "fields":      fields,
-            "footer":      {"text": "DJI Drone Detection"},
+            "footer":      {"text": f"DJI Drone Detection — {antsdr_config.get('sensor_name', 'Sensor').strip() or 'Sensor'}"},
             "timestamp":   time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         }
 
@@ -521,7 +521,7 @@ def _send_discord_proximity_alert(drone: dict, distance_m: float, bearing: float
             "description": f"Drone entered the {threshold} m alert radius.\n[View on map \U0001f5fa]({_map_url(drone)})",
             "color":       0xda3633,
             "fields":      fields,
-            "footer":      {"text": "DJI Drone Detection"},
+            "footer":      {"text": f"DJI Drone Detection — {antsdr_config.get('sensor_name', 'Sensor').strip() or 'Sensor'}"},
             "timestamp":   time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         }
 
@@ -1547,8 +1547,8 @@ if __name__ == "__main__":
                         help="ANTsdr TCP port (default: 52002)")
     parser.add_argument("--host", default="0.0.0.0",
                         help="Web server bind host (default: 0.0.0.0)")
-    parser.add_argument("--port", type=int, default=5000,
-                        help="Web server port (default: 5000)")
+    parser.add_argument("--port", type=int, default=5001,
+                        help="Web server port (default: 5001)")
     parser.add_argument("--stale-timeout", type=int, default=30,
                         help="Seconds before removing unseen drone (default: 30)")
     parser.add_argument("--gpsd-host", default="127.0.0.1",

@@ -32,7 +32,7 @@ pip install -r requirements.txt
    python dji-detect.py
    ```
 
-2. Open `http://<host>:5000` in a browser.
+2. Open `http://<host>:5001` in a browser.
 
 The ANTsdr device should be configured to connect to this machine on the port specified in `dd-config.json` (default `52002`).
 
