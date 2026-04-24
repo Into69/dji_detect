@@ -705,6 +705,22 @@
         <div id="cfg-conn-status"></div>
       </div>
     </div>
+
+    <div id="cfg-serial-status-section" class="cfg-section" style="display:none">
+      <div class="cfg-section-title">Serial Status</div>
+      <div class="cfg-rows">
+        <div class="gpsd-status-grid">
+          <span class="gpsd-key">State</span>       <span class="gpsd-val" id="ser-st-state">—</span>
+          <span class="gpsd-key">Port</span>        <span class="gpsd-val" id="ser-st-port">—</span>
+          <span class="gpsd-key">Baud</span>        <span class="gpsd-val" id="ser-st-baud">—</span>
+          <span class="gpsd-key">Bytes RX</span>    <span class="gpsd-val" id="ser-st-bytes">—</span>
+          <span class="gpsd-key">Lines RX</span>    <span class="gpsd-val" id="ser-st-lines">—</span>
+          <span class="gpsd-key">Last data</span>   <span class="gpsd-val" id="ser-st-lastrx">—</span>
+          <span class="gpsd-key">Uptime</span>      <span class="gpsd-val" id="ser-st-uptime">—</span>
+          <span class="gpsd-key">Last error</span>  <span class="gpsd-val" id="ser-st-error">—</span>
+        </div>
+      </div>
+    </div>
     </div><!-- /cfg-pane-connection -->
 
     <div class="cfg-tab-pane" id="cfg-pane-sensor">
@@ -1522,6 +1538,59 @@ function appendError(msg) {
 }
 
 
+// ── Serial status ─────────────────────────────────────────────────────────
+let _serialLastRx = 0;
+let _serialOpenedAt = 0;
+
+function fmtBytesSize(n) {
+  if (n == null) return '—';
+  if (n < 1024) return n + ' B';
+  if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+  return (n / (1024 * 1024)).toFixed(1) + ' MB';
+}
+
+function fmtDuration(sec) {
+  if (!sec || sec < 0) return '—';
+  const s = Math.floor(sec);
+  if (s < 60) return s + 's';
+  if (s < 3600) return Math.floor(s/60) + 'm ' + (s%60) + 's';
+  return Math.floor(s/3600) + 'h ' + Math.floor((s%3600)/60) + 'm';
+}
+
+function updateSerialStatus(stats) {
+  if (!stats) return;
+  _serialLastRx   = stats.last_rx   || 0;
+  _serialOpenedAt = stats.opened_at || 0;
+
+  const stateEl = document.getElementById('ser-st-state');
+  const stateMap = {
+    idle:    ['Idle',       'err'],
+    opening: ['Opening…',   'warn'],
+    open:    ['Open',       'ok'],
+    error:   ['Error',      'err'],
+    closed:  ['Closed',     'err'],
+  };
+  const [label, cls] = stateMap[stats.state] || [stats.state || '—', ''];
+  stateEl.textContent = label;
+  stateEl.className   = 'gpsd-val ' + cls;
+
+  document.getElementById('ser-st-port').textContent  = stats.port  || '—';
+  document.getElementById('ser-st-baud').textContent  = stats.baud  || '—';
+  document.getElementById('ser-st-bytes').textContent = fmtBytesSize(stats.bytes);
+  document.getElementById('ser-st-lines').textContent = stats.lines != null ? stats.lines : '—';
+  document.getElementById('ser-st-error').textContent = stats.last_error || '—';
+}
+
+setInterval(() => {
+  if (_serialLastRx) {
+    document.getElementById('ser-st-lastrx').textContent = fmtAge(_serialLastRx);
+  }
+  if (_serialOpenedAt) {
+    document.getElementById('ser-st-uptime').textContent = fmtDuration(Date.now()/1000 - _serialOpenedAt);
+  }
+}, 1000);
+
+
 // ── SSE ────────────────────────────────────────────────────────────────────
 const dot = document.getElementById('status-dot');
 let es;
@@ -1538,6 +1607,7 @@ function connect() {
       document.getElementById('mob-dot').classList.toggle('connected', msg.connected);
     }
     else if (msg.type === 'error') appendError(msg);
+    else if (msg.type === 'serial_status') updateSerialStatus(msg.stats);
   };
   es.onerror = () => { es.close(); setTimeout(connect, 3000); };
 }
@@ -1657,6 +1727,7 @@ function loadSerialPorts(selectPort) {
 function toggleConnType(type, selectPort) {
   document.getElementById('cfg-tcp-rows').style.display    = type === 'tcp'    ? '' : 'none';
   document.getElementById('cfg-serial-rows').style.display = type === 'serial' ? '' : 'none';
+  document.getElementById('cfg-serial-status-section').style.display = type === 'serial' ? '' : 'none';
   if (type === 'serial') loadSerialPorts(selectPort || document.getElementById('cfg-serial-port').value);
 }
 document.getElementById('cfg-conn-type').addEventListener('change', function() { toggleConnType(this.value); });

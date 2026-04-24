@@ -67,6 +67,16 @@ antsdr_config: dict = {
 }
 antsdr_reconnect = threading.Event()  # set to force receiver to reconnect
 antsdr_connected: bool = False        # True while TCP connection to ANTsdr is live
+serial_stats: dict = {
+    "state":        "idle",   # idle | opening | open | error | closed
+    "port":         "",
+    "baud":         0,
+    "bytes":        0,
+    "lines":        0,
+    "last_rx":      0.0,      # wall time of last byte received
+    "opened_at":    0.0,      # wall time port was opened
+    "last_error":   "",
+}
 raw_lines: collections.deque = collections.deque(maxlen=200)  # recent raw lines (TCP or serial)
 drone_history: dict = {}              # serial_number -> last known drone dict
 data_lock = threading.Lock()
@@ -344,6 +354,17 @@ def _set_antsdr_connected(state: bool):
     global antsdr_connected
     antsdr_connected = state
     broadcast({"type": "antsdr_status", "connected": state})
+
+
+def _set_serial_state(state: str, error: str = ""):
+    serial_stats["state"] = state
+    if error:
+        serial_stats["last_error"] = error
+    broadcast({"type": "serial_status", "stats": serial_stats.copy()})
+
+
+def _broadcast_serial_stats():
+    broadcast({"type": "serial_status", "stats": serial_stats.copy()})
 
 
 def _map_url(drone: dict) -> str:
@@ -826,15 +847,36 @@ def _serial_loop():
     port = antsdr_config["serial_port"]
     baud = antsdr_config["serial_baud"]
     print(f"[ANTsdr] Serial {port} @ {baud}")
+    serial_stats["port"]  = port
+    serial_stats["baud"]  = baud
+    serial_stats["bytes"] = 0
+    serial_stats["lines"] = 0
+    _set_serial_state("opening")
     _kill_port_holders(port)
-    with _serial.Serial(port, baud, timeout=1) as ser:
-        _set_antsdr_connected(True)
-        while not antsdr_reconnect.is_set():
-            raw = ser.readline()
-            if not raw:
-                continue
-            line = raw.decode("utf-8", errors="replace")
-            _process_line(line)
+    try:
+        with _serial.Serial(port, baud, timeout=1) as ser:
+            serial_stats["opened_at"] = time.time()
+            _set_serial_state("open")
+            _set_antsdr_connected(True)
+            last_stats_broadcast = 0.0
+            while not antsdr_reconnect.is_set():
+                raw = ser.readline()
+                if not raw:
+                    continue
+                serial_stats["bytes"] += len(raw)
+                serial_stats["lines"] += 1
+                serial_stats["last_rx"] = time.time()
+                line = raw.decode("utf-8", errors="replace")
+                _process_line(line)
+                now = time.time()
+                if now - last_stats_broadcast >= 2.0:
+                    last_stats_broadcast = now
+                    _broadcast_serial_stats()
+    except Exception as e:
+        _set_serial_state("error", str(e))
+        raise
+    finally:
+        _set_serial_state("closed")
 
 
 def antsdr_receiver():
@@ -995,6 +1037,8 @@ def _sse_generator():
 
     # Send current state to new client
     payload = json.dumps({"type": "antsdr_status", "connected": antsdr_connected})
+    yield f"data: {payload}\n\n".encode()
+    payload = json.dumps({"type": "serial_status", "stats": serial_stats})
     yield f"data: {payload}\n\n".encode()
     with data_lock:
         if sensor_position:
