@@ -765,7 +765,8 @@ def _process_line(line: str):
                 cooldown = max(0, int(antsdr_config.get("proximity_cooldown_s", 60)))
                 now = time.time()
                 last = _proximity_last_alert.get(sn, 0)
-                if not was_inside or (now - last) >= cooldown:
+                # Fire on entry; while still inside, only re-fire after 2× the cooldown.
+                if not was_inside or (now - last) >= cooldown * 2:
                     _proximity_last_alert[sn] = now
                     brg = _bearing_deg(slat, slon, dlat, dlon)
                     _io_executor.submit(_send_discord_proximity_alert, snapshot, dist, brg)

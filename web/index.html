@@ -232,6 +232,10 @@
     }
     .cfg-input:focus { border-color: #58a6ff; }
 
+    .cfg-input-suffix { flex: 1; display: flex; align-items: center; gap: 6px; }
+    .cfg-input-suffix .cfg-input { flex: 0 0 50%; min-width: 0; }
+    .cfg-suffix { font-size: 12px; color: #8b949e; }
+
     .cfg-select {
       flex: 1;
       background: #0d1117;
@@ -929,7 +933,10 @@
         </div>
         <div class="cfg-row">
           <label>Cooldown</label>
-          <input id="cfg-proximity-cooldown" class="cfg-input" type="number" min="0" step="10" placeholder="60" />
+          <span class="cfg-input-suffix">
+            <input id="cfg-proximity-cooldown" class="cfg-input" type="number" min="0" step="10" placeholder="60" />
+            <span class="cfg-suffix">seconds</span>
+          </span>
         </div>
       </div>
     </div>
