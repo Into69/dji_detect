@@ -1519,9 +1519,6 @@ function fireProximityAlert(droneOrSerial, dist, brg) {
   showToast(msg, 'err');
   beep();
   showProximityPopup(d, dist, brg);
-  if ('Notification' in window && Notification.permission === 'granted') {
-    try { new Notification('Drone proximity alert', { body: msg }); } catch {}
-  }
 }
 
 function checkProximity(e) {
@@ -1889,9 +1886,6 @@ function loadConfig() {
         map.setView(sensorMarker.getLatLng(), map.getZoom());
         updateRangeRings();
       }
-      if (proximityEnabled && 'Notification' in window && Notification.permission === 'default') {
-        Notification.requestPermission().catch(() => {});
-      }
     })
     .catch(() => {});
 }
@@ -2052,9 +2046,6 @@ document.getElementById('btn-trails').addEventListener('click', function () {
 
 document.getElementById('cfg-proximity-enabled').addEventListener('change', function () {
   proximityEnabled = this.checked;
-  if (proximityEnabled && 'Notification' in window && Notification.permission === 'default') {
-    Notification.requestPermission().catch(() => {});
-  }
   if (!proximityEnabled) for (const e of Object.values(drones)) e.insideProximity = false;
 });
 
