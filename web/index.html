@@ -238,6 +238,18 @@
     .cfg-input-suffix .cfg-input { flex: 0 0 50%; min-width: 0; }
     .cfg-suffix { font-size: 12px; color: #8b949e; }
 
+    /* Geofence zone cards in settings */
+    .zone-card { border: 1px solid #30363d; border-radius: 6px; padding: 8px; margin-bottom: 6px; background: #0d1117; }
+    .zone-card-head { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }
+    .zone-card-head input[type="text"] { flex: 1; background: #0d1117; border: 1px solid #30363d; color: #e6edf3; border-radius: 4px; padding: 3px 6px; font-size: 12px; }
+    .zone-card-head input[type="color"] { width: 28px; height: 24px; border: 1px solid #30363d; background: #0d1117; border-radius: 4px; cursor: pointer; padding: 0; }
+    .zone-card-row { display: flex; align-items: center; gap: 8px; font-size: 11px; color: #8b949e; flex-wrap: wrap; }
+    .zone-card-row label { display: flex; align-items: center; gap: 4px; }
+    .zone-card-row input[type="number"] { width: 60px; background: #0d1117; border: 1px solid #30363d; color: #e6edf3; border-radius: 4px; padding: 2px 5px; font-size: 11px; }
+    .zone-card-del { background: transparent; border: 1px solid #30363d; color: #f85149; border-radius: 4px; padding: 2px 8px; cursor: pointer; font-size: 11px; }
+    .zone-card-del:hover { background: rgba(248,81,73,0.1); }
+    .zone-points { font-size: 10px; color: #6e7681; margin-top: 4px; }
+
     .cfg-select {
       flex: 1;
       background: #0d1117;
@@ -985,6 +997,60 @@
       </div>
     </div>
 
+    <!-- Voice announcements -->
+    <div class="cfg-section">
+      <div class="cfg-section-title">Voice announcements</div>
+      <div class="cfg-rows">
+        <div class="cfg-row">
+          <label>Enabled</label>
+          <input id="cfg-tts-enabled" type="checkbox" />
+        </div>
+        <div class="cfg-row">
+          <label>Voice</label>
+          <select id="cfg-tts-voice" class="cfg-select"></select>
+        </div>
+        <div class="cfg-row">
+          <label>Rate</label>
+          <input id="cfg-tts-rate" type="range" min="0.5" max="2" step="0.1" value="1" style="flex:1" />
+          <span id="cfg-tts-rate-val" style="font-size:11px;color:#8b949e;min-width:32px;text-align:right">1.0×</span>
+        </div>
+        <div class="cfg-row">
+          <label>New drone</label>
+          <input id="cfg-tts-announce-new" type="checkbox" />
+        </div>
+        <div class="cfg-row">
+          <label>Proximity</label>
+          <input id="cfg-tts-announce-proximity" type="checkbox" />
+        </div>
+        <div class="cfg-row">
+          <label>Zone entry</label>
+          <input id="cfg-tts-announce-zone" type="checkbox" />
+        </div>
+        <div class="cfg-btn-row">
+          <button class="cfg-btn" id="btn-tts-test">Test</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Geofence zones -->
+    <div class="cfg-section">
+      <div class="cfg-section-title">Geofence zones</div>
+      <div class="cfg-rows">
+        <div id="cfg-zones-list"></div>
+        <div class="cfg-btn-row">
+          <button class="cfg-btn" id="btn-zone-draw">＋ Draw new zone</button>
+        </div>
+        <div id="cfg-zone-draw-status" style="display:none;font-size:11px;color:#3fb950;padding:4px 0">
+          <div>Click on the map to add points (need at least 3).</div>
+          <div style="margin-top:4px">
+            <button class="cfg-btn" id="btn-zone-finish">Finish</button>
+            <button class="cfg-btn" id="btn-zone-cancel">Cancel</button>
+            <span id="cfg-zone-pointcount" style="margin-left:8px;color:#8b949e">0 points</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <!-- Discord -->
     <div class="cfg-section">
       <div class="cfg-section-title">Discord</div>
@@ -1035,6 +1101,35 @@
           <button class="cfg-btn" id="btn-import-history">Import JSON</button>
         </div>
         <input type="file" id="history-file-input" accept=".json,application/json" style="display:none" />
+      </div>
+    </div>
+
+    <!-- Recordings -->
+    <div class="cfg-section">
+      <div class="cfg-section-title">Recordings</div>
+      <div class="cfg-rows">
+        <div style="font-size:11px;color:#8b949e;line-height:1.4">
+          Capture the raw ANTsdr stream to a file, then replay it later for testing or demos.
+        </div>
+        <div class="cfg-row">
+          <label>Name</label>
+          <input type="text" class="cfg-input" id="rec-name" placeholder="auto: rec-YYYYMMDD-HHMMSS" />
+        </div>
+        <div class="cfg-btn-row">
+          <button class="cfg-btn" id="btn-record-toggle">● Start recording</button>
+          <button class="cfg-btn" id="btn-record-upload">Upload .ndjson</button>
+        </div>
+        <input type="file" id="record-file-input" accept=".ndjson,application/x-ndjson,application/json" style="display:none" />
+        <div id="rec-status" style="font-size:12px;color:#8b949e;min-height:16px"></div>
+        <div class="cfg-row">
+          <label>Replay</label>
+          <div class="cfg-input-suffix">
+            <input type="number" class="cfg-input" id="rec-speed" min="0.1" max="50" step="0.1" value="1.0" />
+            <span style="color:#8b949e;font-size:12px">× speed</span>
+          </div>
+        </div>
+        <div id="rec-replay-status" style="font-size:12px;color:#8b949e;min-height:16px"></div>
+        <div id="rec-list" style="display:flex;flex-direction:column;gap:6px;margin-top:4px"></div>
       </div>
     </div>
 
@@ -1195,7 +1290,49 @@ let showTrails = true;
 const TRAIL_MAX_POINTS = 200;
 let proximityEnabled  = false;
 let proximityDistance = 1000;   // meters
+let geofenceZones = [];           // server-synced array of zone dicts
+let _zoneLayers = {};             // zone id → Leaflet polygon
+let _drawingZone = null;          // {points: [...], markers: [...], previewLine}
+let ttsEnabled    = false;
+let ttsAnnounceNew       = true;
+let ttsAnnounceProximity = true;
+let ttsAnnounceZone      = true;
+let ttsVoice  = '';
+let ttsRate   = 1.0;
 let _audioCtx = null;
+
+function speak(text) {
+  if (!ttsEnabled || !text) return;
+  if (!('speechSynthesis' in window)) return;
+  try {
+    const u = new SpeechSynthesisUtterance(text);
+    u.rate = ttsRate;
+    if (ttsVoice) {
+      const v = window.speechSynthesis.getVoices().find(x => x.name === ttsVoice);
+      if (v) u.voice = v;
+    }
+    window.speechSynthesis.speak(u);
+  } catch {}
+}
+
+function populateVoiceList() {
+  const sel = document.getElementById('cfg-tts-voice');
+  if (!sel || !('speechSynthesis' in window)) return;
+  const voices = window.speechSynthesis.getVoices();
+  const current = ttsVoice || sel.value;
+  sel.innerHTML = '<option value="">(default)</option>';
+  for (const v of voices) {
+    const opt = document.createElement('option');
+    opt.value = v.name;
+    opt.textContent = `${v.name} (${v.lang})${v.default ? ' — default' : ''}`;
+    sel.appendChild(opt);
+  }
+  if (current) sel.value = current;
+}
+if ('speechSynthesis' in window) {
+  populateVoiceList();
+  window.speechSynthesis.onvoiceschanged = populateVoiceList;
+}
 let _historyMarkers = [];
 
 function clearHistoryMarkers() {
@@ -1519,6 +1656,17 @@ function fireProximityAlert(droneOrSerial, dist, brg) {
   showToast(msg, 'err');
   beep();
   showProximityPopup(d, dist, brg);
+  if (ttsAnnounceProximity) {
+    const model = d.device_type || 'drone';
+    const bear = (brg != null) ? `${Math.round(brg)} degrees ${compassPoint(brg)}` : '';
+    speak(`Proximity alert. ${model} at ${fmtDistanceSpoken(dist)}${bear ? ', ' + bear : ''}.`);
+  }
+}
+
+function fmtDistanceSpoken(m) {
+  if (m == null) return '';
+  if (m >= 1000) return (m / 1000).toFixed(1) + ' kilometres';
+  return Math.round(m) + ' metres';
 }
 
 function checkProximity(e) {
@@ -1538,10 +1686,213 @@ function checkProximity(e) {
 }
 
 
+// ── Geofence zones ─────────────────────────────────────────────────────────
+function renderZones() {
+  for (const id in _zoneLayers) {
+    map.removeLayer(_zoneLayers[id]);
+    delete _zoneLayers[id];
+  }
+  for (const z of geofenceZones) {
+    if (!z.points || z.points.length < 3) continue;
+    const poly = L.polygon(z.points, {
+      color: z.color || '#f85149',
+      weight: 2,
+      opacity: 0.9,
+      fillOpacity: z.enabled ? 0.15 : 0.05,
+      dashArray: z.enabled ? null : '4 4',
+    }).addTo(map);
+    poly.bindTooltip(z.name || 'Zone', { permanent: false, direction: 'center', className: 'range-ring-label' });
+    _zoneLayers[z.id] = poly;
+  }
+}
+
+function renderZoneSettings() {
+  const list = document.getElementById('cfg-zones-list');
+  if (!list) return;
+  list.innerHTML = '';
+  if (!geofenceZones.length) {
+    list.innerHTML = '<div style="font-size:11px;color:#6e7681;padding:4px 0">No zones yet — click "Draw new zone" to add one.</div>';
+    return;
+  }
+  for (const z of geofenceZones) {
+    const card = document.createElement('div');
+    card.className = 'zone-card';
+    card.innerHTML = `
+      <div class="zone-card-head">
+        <input type="color" data-zid="${z.id}" data-field="color" value="${z.color || '#f85149'}" />
+        <input type="text"  data-zid="${z.id}" data-field="name"  value="${escHtml(z.name || 'Zone')}" />
+        <button class="zone-card-del" data-zid="${z.id}">Delete</button>
+      </div>
+      <div class="zone-card-row">
+        <label><input type="checkbox" data-zid="${z.id}" data-field="enabled" ${z.enabled ? 'checked' : ''} /> Enabled</label>
+        <label><input type="checkbox" data-zid="${z.id}" data-field="discord" ${z.discord ? 'checked' : ''} /> Discord</label>
+        <label>Cooldown <input type="number" data-zid="${z.id}" data-field="cooldown_s" min="0" step="10" value="${z.cooldown_s != null ? z.cooldown_s : 60}" /> s</label>
+      </div>
+      <div class="zone-points">${z.points.length} vertices</div>`;
+    list.appendChild(card);
+  }
+  // Wire field edits
+  list.querySelectorAll('input[data-zid]').forEach(inp => {
+    inp.addEventListener('change', (ev) => {
+      const zid = ev.target.dataset.zid;
+      const field = ev.target.dataset.field;
+      const z = geofenceZones.find(x => x.id === zid);
+      if (!z) return;
+      let v;
+      if (ev.target.type === 'checkbox') v = ev.target.checked;
+      else if (ev.target.type === 'number') v = Math.max(0, parseInt(ev.target.value, 10) || 0);
+      else v = ev.target.value;
+      z[field] = v;
+      saveZones();
+      renderZones();
+    });
+  });
+  list.querySelectorAll('.zone-card-del').forEach(btn => {
+    btn.addEventListener('click', (ev) => {
+      const zid = ev.target.dataset.zid;
+      geofenceZones = geofenceZones.filter(z => z.id !== zid);
+      saveZones();
+      renderZones();
+      renderZoneSettings();
+    });
+  });
+}
+
+function saveZones() {
+  fetch('/zones', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ zones: geofenceZones }),
+  }).catch(() => {});
+}
+
+function startDrawZone() {
+  if (_drawingZone) return;
+  _drawingZone = { points: [], markers: [], previewLine: null };
+  document.getElementById('cfg-zone-draw-status').style.display = '';
+  document.getElementById('btn-zone-draw').disabled = true;
+  map.getContainer().style.cursor = 'crosshair';
+  map.on('click', onDrawClick);
+  updateDrawPointCount();
+}
+
+function onDrawClick(ev) {
+  if (!_drawingZone) return;
+  const ll = [ev.latlng.lat, ev.latlng.lng];
+  _drawingZone.points.push(ll);
+  const m = L.circleMarker(ll, { radius: 4, color: '#f85149', fillColor: '#f85149', fillOpacity: 1, weight: 1 }).addTo(map);
+  _drawingZone.markers.push(m);
+  if (_drawingZone.previewLine) map.removeLayer(_drawingZone.previewLine);
+  if (_drawingZone.points.length >= 2) {
+    _drawingZone.previewLine = L.polygon(_drawingZone.points, { color: '#f85149', weight: 2, dashArray: '4 4', fillOpacity: 0.1 }).addTo(map);
+  }
+  updateDrawPointCount();
+}
+
+function updateDrawPointCount() {
+  const el = document.getElementById('cfg-zone-pointcount');
+  if (el) el.textContent = (_drawingZone ? _drawingZone.points.length : 0) + ' points';
+}
+
+function finishDrawZone() {
+  if (!_drawingZone) return;
+  if (_drawingZone.points.length < 3) {
+    showToast('Need at least 3 points for a zone.', 'err');
+    return;
+  }
+  const id = 'z' + Date.now();
+  geofenceZones.push({
+    id, name: 'Zone ' + (geofenceZones.length + 1),
+    color: '#f85149',
+    points: _drawingZone.points.slice(),
+    enabled: true, discord: true, cooldown_s: 60,
+  });
+  cancelDrawZone();
+  saveZones();
+  renderZones();
+  renderZoneSettings();
+}
+
+function cancelDrawZone() {
+  if (!_drawingZone) return;
+  for (const m of _drawingZone.markers) map.removeLayer(m);
+  if (_drawingZone.previewLine) map.removeLayer(_drawingZone.previewLine);
+  _drawingZone = null;
+  document.getElementById('cfg-zone-draw-status').style.display = 'none';
+  document.getElementById('btn-zone-draw').disabled = false;
+  map.getContainer().style.cursor = '';
+  map.off('click', onDrawClick);
+}
+
+document.getElementById('btn-zone-draw').addEventListener('click', startDrawZone);
+document.getElementById('btn-zone-finish').addEventListener('click', finishDrawZone);
+document.getElementById('btn-zone-cancel').addEventListener('click', cancelDrawZone);
+
+
+function showZoneAlertPopup(d, zone) {
+  const serial = d.serial_number;
+  const container = document.getElementById('prox-popup-container');
+  if (!container) return;
+  const key = serial + '::' + (zone.id || 'zone');
+  if (_proxPopups[key]) {
+    clearTimeout(_proxPopups[key].timer);
+    _proxPopups[key].el.remove();
+    delete _proxPopups[key];
+  }
+  const alt  = (d.geodetic_altitude != null) ? d.geodetic_altitude.toFixed(1) + ' m' : 'N/A';
+  const spd  = (d.horizontal_speed != null) ? d.horizontal_speed.toFixed(1) + ' m/s' : 'N/A';
+  const rssi = (d.rssi != null) ? d.rssi + ' dBm' : 'N/A';
+  const color = zone.color || '#f85149';
+
+  const el = document.createElement('div');
+  el.className = 'prox-popup';
+  el.style.borderColor = color;
+  el.innerHTML = `
+    <div class="prox-popup-head" style="background:${color}22;border-bottom-color:${color}55">
+      <div class="prox-popup-title" style="color:${color}">⚠ Geofence: ${escHtml(zone.name || 'Zone')}</div>
+      <button class="prox-popup-close" aria-label="Close">×</button>
+    </div>
+    <div class="prox-popup-body">
+      <div class="prox-popup-row"><span class="prox-popup-key">Drone</span><span class="prox-popup-val">${escHtml(serial)}</span></div>
+      <div class="prox-popup-row"><span class="prox-popup-key">Model</span><span class="prox-popup-val">${escHtml(d.device_type || 'Unknown')}</span></div>
+      <div class="prox-popup-row"><span class="prox-popup-key">Altitude</span><span class="prox-popup-val">${alt}</span></div>
+      <div class="prox-popup-row"><span class="prox-popup-key">Speed</span><span class="prox-popup-val">${spd}</span></div>
+      <div class="prox-popup-row"><span class="prox-popup-key">RSSI</span><span class="prox-popup-val">${rssi}</span></div>
+    </div>
+    <div class="prox-popup-progress"><div class="prox-popup-progress-bar" style="background:${color}"></div></div>
+  `;
+  container.appendChild(el);
+  const bar = el.querySelector('.prox-popup-progress-bar');
+  const dismiss = () => {
+    if (!_proxPopups[key]) return;
+    clearTimeout(_proxPopups[key].timer);
+    el.classList.add('hide');
+    setTimeout(() => { el.remove(); }, 200);
+    delete _proxPopups[key];
+  };
+  el.querySelector('.prox-popup-close').addEventListener('click', dismiss);
+  bar.style.transition = `transform ${PROX_POPUP_DURATION_MS}ms linear`;
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => { bar.style.transform = 'scaleX(0)'; });
+  });
+  _proxPopups[key] = { el, timer: setTimeout(dismiss, PROX_POPUP_DURATION_MS) };
+  showToast(`⚠ ${serial} entered ${zone.name || 'zone'}`, 'err');
+  beep();
+  if (ttsAnnounceZone) {
+    const model = d.device_type || 'drone';
+    speak(`Zone alert. ${model} entered ${zone.name || 'zone'}.`);
+  }
+}
+
+
 // ── Drone upsert / remove ──────────────────────────────────────────────────
 function upsertDrone(d) {
   const serial = d.serial_number;
-  if (!drones[serial]) drones[serial] = { data: d, droneMarker: null, pilotMarker: null, homeMarker: null, lines: [], trail: [], trailLine: null, insideProximity: false };
+  const isNew = !drones[serial];
+  if (isNew) drones[serial] = { data: d, droneMarker: null, pilotMarker: null, homeMarker: null, lines: [], trail: [], trailLine: null, insideProximity: false };
+  if (isNew && ttsAnnounceNew) {
+    speak(`New drone detected. ${d.device_type || 'Unknown model'}.`);
+  }
   const e = drones[serial];
   e.data = d;
 
@@ -1810,6 +2161,8 @@ function connect() {
     }
     else if (msg.type === 'error') appendError(msg);
     else if (msg.type === 'serial_status') updateSerialStatus(msg.stats);
+    else if (msg.type === 'zone_alert')    showZoneAlertPopup(msg.drone, msg.zone);
+    else if (msg.type === 'replay_status') updateReplayStatus(msg);
   };
   es.onerror = () => { es.close(); setTimeout(connect, 3000); };
 }
@@ -1880,6 +2233,23 @@ function loadConfig() {
       document.getElementById('cfg-proximity-distance').value   = proximityDistance;
       document.getElementById('cfg-proximity-discord').checked  = !!cfg.proximity_discord;
       document.getElementById('cfg-proximity-cooldown').value   = (cfg.proximity_cooldown_s != null) ? cfg.proximity_cooldown_s : 60;
+      ttsEnabled           = !!cfg.tts_enabled;
+      ttsAnnounceNew       = cfg.tts_announce_new       !== false;
+      ttsAnnounceProximity = cfg.tts_announce_proximity !== false;
+      ttsAnnounceZone      = cfg.tts_announce_zone      !== false;
+      ttsVoice = cfg.tts_voice || '';
+      ttsRate  = parseFloat(cfg.tts_rate) || 1.0;
+      document.getElementById('cfg-tts-enabled').checked            = ttsEnabled;
+      document.getElementById('cfg-tts-announce-new').checked       = ttsAnnounceNew;
+      document.getElementById('cfg-tts-announce-proximity').checked = ttsAnnounceProximity;
+      document.getElementById('cfg-tts-announce-zone').checked      = ttsAnnounceZone;
+      document.getElementById('cfg-tts-rate').value                 = ttsRate;
+      document.getElementById('cfg-tts-rate-val').textContent       = ttsRate.toFixed(1) + '×';
+      populateVoiceList();
+      if (ttsVoice) document.getElementById('cfg-tts-voice').value = ttsVoice;
+      geofenceZones = Array.isArray(cfg.geofence_zones) ? cfg.geofence_zones : [];
+      renderZones();
+      renderZoneSettings();
       updateLinesVisibility();
       updateTrailsVisibility();
       if (rangeRings && sensorMarker) {
@@ -1956,6 +2326,12 @@ function postConfig(reconnect) {
     proximity_distance_m: parseInt(document.getElementById('cfg-proximity-distance').value, 10) || 1000,
     proximity_discord:    document.getElementById('cfg-proximity-discord').checked,
     proximity_cooldown_s: Math.max(0, parseInt(document.getElementById('cfg-proximity-cooldown').value, 10) || 0),
+    tts_enabled:            document.getElementById('cfg-tts-enabled').checked,
+    tts_announce_new:       document.getElementById('cfg-tts-announce-new').checked,
+    tts_announce_proximity: document.getElementById('cfg-tts-announce-proximity').checked,
+    tts_announce_zone:      document.getElementById('cfg-tts-announce-zone').checked,
+    tts_voice:              document.getElementById('cfg-tts-voice').value || '',
+    tts_rate:               parseFloat(document.getElementById('cfg-tts-rate').value) || 1.0,
     sensor_icon:             document.getElementById('cfg-sensor-icon').value,
     sensor_name:             document.getElementById('cfg-sensor-name').value.trim() || 'Sensor',
     sensor_location_source:  document.getElementById('cfg-sensor-location-source').value,
@@ -1966,6 +2342,7 @@ function postConfig(reconnect) {
     tak_protocol:     document.getElementById('cfg-tak-protocol').value,
     tak_host:         document.getElementById('cfg-tak-host').value.trim(),
     tak_port:         parseInt(document.getElementById('cfg-tak-port').value, 10) || 8087,
+    geofence_zones:   geofenceZones,
     reconnect,
   };
 
@@ -2056,6 +2433,20 @@ document.getElementById('cfg-proximity-distance').addEventListener('change', fun
     // Reset latched state so a re-arm with new threshold can fire again
     for (const e of Object.values(drones)) e.insideProximity = false;
   }
+});
+
+document.getElementById('cfg-tts-enabled').addEventListener('change', function () { ttsEnabled = this.checked; });
+document.getElementById('cfg-tts-announce-new').addEventListener('change', function () { ttsAnnounceNew = this.checked; });
+document.getElementById('cfg-tts-announce-proximity').addEventListener('change', function () { ttsAnnounceProximity = this.checked; });
+document.getElementById('cfg-tts-announce-zone').addEventListener('change', function () { ttsAnnounceZone = this.checked; });
+document.getElementById('cfg-tts-voice').addEventListener('change', function () { ttsVoice = this.value; });
+document.getElementById('cfg-tts-rate').addEventListener('input', function () {
+  ttsRate = parseFloat(this.value) || 1.0;
+  document.getElementById('cfg-tts-rate-val').textContent = ttsRate.toFixed(1) + '×';
+});
+document.getElementById('btn-tts-test').addEventListener('click', function () {
+  if (!ttsEnabled) { showToast('Voice announcements are disabled.', 'err'); return; }
+  speak('Voice announcements are working.');
 });
 
 document.getElementById('btn-rings').addEventListener('click', function () {
@@ -2328,6 +2719,211 @@ document.getElementById('history-file-input').addEventListener('change', functio
   };
   reader.readAsText(file);
   this.value = '';  // reset so same file can be re-selected
+});
+
+
+// ── Recordings ────────────────────────────────────────────────────────────
+const recNameInput   = document.getElementById('rec-name');
+const recSpeedInput  = document.getElementById('rec-speed');
+const recStatusEl    = document.getElementById('rec-status');
+const recReplayEl    = document.getElementById('rec-replay-status');
+const recListEl      = document.getElementById('rec-list');
+const recToggleBtn   = document.getElementById('btn-record-toggle');
+const recUploadBtn   = document.getElementById('btn-record-upload');
+const recFileInput   = document.getElementById('record-file-input');
+let _recState = { active: false };
+
+function fmtBytes(n) {
+  if (n == null) return '';
+  if (n < 1024) return n + ' B';
+  if (n < 1024*1024) return (n/1024).toFixed(1) + ' KB';
+  return (n/(1024*1024)).toFixed(1) + ' MB';
+}
+function fmtMtime(ts) {
+  if (!ts) return '';
+  const d = new Date(ts * 1000);
+  return d.toLocaleString();
+}
+
+function refreshRecordings() {
+  fetch('/record/status').then(r => r.json()).then(s => {
+    _recState = s.recording || { active: false };
+    if (_recState.active) {
+      recToggleBtn.textContent = '■ Stop recording';
+      recToggleBtn.classList.add('active');
+      recStatusEl.textContent = `Recording → ${_recState.file}  ·  ${_recState.lines} line${_recState.lines === 1 ? '' : 's'}`;
+      recStatusEl.style.color = '#3fb950';
+    } else {
+      recToggleBtn.textContent = '● Start recording';
+      recToggleBtn.classList.remove('active');
+      recStatusEl.textContent = '';
+    }
+    updateReplayStatus(s.replay);
+  }).catch(() => {});
+  fetch('/record/list').then(r => r.json()).then(d => renderRecordingsList(d.files || []))
+    .catch(() => { recListEl.textContent = ''; });
+}
+
+function renderRecordingsList(files) {
+  if (!files.length) {
+    recListEl.innerHTML = '<div style="font-size:11px;color:#6e7681;padding:6px 0">No recordings.</div>';
+    return;
+  }
+  const replayActive = _replayLast && _replayLast.active;
+  const replayFile   = _replayLast && _replayLast.file;
+  recListEl.innerHTML = files.map(f => {
+    const lines = f.lines == null ? '' : ` · ${f.lines} lines`;
+    const isPlaying = replayActive && replayFile === f.name;
+    const playBtn = isPlaying
+      ? `<button class="cfg-btn rec-stop" data-name="${escHtml(f.name)}">■ Stop</button>`
+      : `<button class="cfg-btn rec-play" data-name="${escHtml(f.name)}">▶ Replay</button>`;
+    return `
+      <div style="border:1px solid #30363d;border-radius:6px;padding:8px;display:flex;flex-direction:column;gap:4px">
+        <div style="display:flex;justify-content:space-between;gap:8px;align-items:center">
+          <div style="font-weight:600;font-size:12px;word-break:break-all">${escHtml(f.name)}</div>
+          <div style="font-size:11px;color:#6e7681;white-space:nowrap">${fmtBytes(f.size)}${lines}</div>
+        </div>
+        <div style="font-size:11px;color:#6e7681">${fmtMtime(f.mtime)}</div>
+        <div class="cfg-btn-row" style="margin-top:4px">
+          ${playBtn}
+          <button class="cfg-btn rec-download" data-name="${escHtml(f.name)}">Download</button>
+          <button class="cfg-btn rec-delete" data-name="${escHtml(f.name)}" style="color:#f85149">Delete</button>
+        </div>
+      </div>`;
+  }).join('');
+
+  recListEl.querySelectorAll('.rec-play').forEach(b => {
+    b.addEventListener('click', () => startReplay(b.dataset.name));
+  });
+  recListEl.querySelectorAll('.rec-stop').forEach(b => {
+    b.addEventListener('click', () => stopReplay());
+  });
+  recListEl.querySelectorAll('.rec-download').forEach(b => {
+    b.addEventListener('click', () => {
+      window.location.href = '/record/download/' + encodeURIComponent(b.dataset.name);
+    });
+  });
+  recListEl.querySelectorAll('.rec-delete').forEach(b => {
+    b.addEventListener('click', () => deleteRecording(b.dataset.name));
+  });
+}
+
+let _replayLast = { active: false };
+function updateReplayStatus(s) {
+  _replayLast = s || { active: false };
+  if (s && s.active) {
+    const pct = s.total ? Math.floor((s.sent / s.total) * 100) : 0;
+    recReplayEl.textContent = `Replaying ${s.file} @ ${s.speed}× — ${s.sent}/${s.total || '?'} (${pct}%)`;
+    recReplayEl.style.color = '#58a6ff';
+  } else {
+    recReplayEl.textContent = '';
+  }
+  // Re-render list so play/stop buttons reflect current state.
+  fetch('/record/list').then(r => r.json()).then(d => renderRecordingsList(d.files || [])).catch(() => {});
+}
+
+recToggleBtn.addEventListener('click', () => {
+  if (_recState.active) {
+    fetch('/record/stop', { method: 'POST' })
+      .then(r => r.json()).then(d => {
+        if (d.ok) showToast(`Stopped — saved ${d.lines} lines.`);
+        else showToast(d.error || 'Stop failed.', 'err');
+        refreshRecordings();
+      })
+      .catch(() => showToast('Stop failed.', 'err'));
+  } else {
+    const name = (recNameInput.value || '').trim();
+    fetch('/record/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name }),
+    })
+      .then(r => r.json()).then(d => {
+        if (d.ok) { showToast(`Recording to ${d.file}`); recNameInput.value = ''; }
+        else showToast(d.error || 'Start failed.', 'err');
+        refreshRecordings();
+      })
+      .catch(() => showToast('Start failed.', 'err'));
+  }
+});
+
+recUploadBtn.addEventListener('click', () => recFileInput.click());
+recFileInput.addEventListener('change', function () {
+  const file = this.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = e => {
+    fetch('/record/upload?name=' + encodeURIComponent(file.name), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-ndjson' },
+      body: e.target.result,
+    })
+      .then(r => r.json()).then(d => {
+        if (d.ok) showToast(`Imported ${d.name} (${d.lines} entries)`);
+        else showToast(d.error || 'Upload failed.', 'err');
+        refreshRecordings();
+      })
+      .catch(() => showToast('Upload failed.', 'err'));
+  };
+  reader.readAsText(file);
+  this.value = '';
+});
+
+function startReplay(name) {
+  const speed = parseFloat(recSpeedInput.value) || 1.0;
+  fetch('/record/replay/start', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name, speed }),
+  })
+    .then(r => r.json()).then(d => {
+      if (d.ok) showToast(`Replaying ${name} @ ${speed}×`);
+      else showToast(d.error || 'Replay failed.', 'err');
+      refreshRecordings();
+    })
+    .catch(() => showToast('Replay failed.', 'err'));
+}
+
+function stopReplay() {
+  fetch('/record/replay/stop', { method: 'POST' })
+    .then(r => r.json()).then(d => {
+      if (d.ok) showToast('Replay stopped.');
+      else showToast(d.error || 'Stop failed.', 'err');
+      refreshRecordings();
+    })
+    .catch(() => showToast('Stop failed.', 'err'));
+}
+
+function deleteRecording(name) {
+  if (!confirm(`Delete recording "${name}"?`)) return;
+  fetch('/record/delete', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name }),
+  })
+    .then(r => r.json()).then(d => {
+      if (d.ok) showToast(`Deleted ${name}`);
+      else showToast(d.error || 'Delete failed.', 'err');
+      refreshRecordings();
+    })
+    .catch(() => showToast('Delete failed.', 'err'));
+}
+
+// Refresh while the Data tab is visible.
+let _recPollTimer = null;
+function startRecPoll() {
+  if (_recPollTimer) return;
+  refreshRecordings();
+  _recPollTimer = setInterval(refreshRecordings, 2000);
+}
+function stopRecPoll() {
+  if (_recPollTimer) { clearInterval(_recPollTimer); _recPollTimer = null; }
+}
+document.querySelectorAll('.cfg-tab').forEach(tab => {
+  tab.addEventListener('click', () => {
+    if (tab.dataset.pane === 'cfg-pane-data') startRecPoll();
+    else stopRecPoll();
+  });
 });
 
 

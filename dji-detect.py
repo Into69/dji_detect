@@ -3,7 +3,7 @@ DJI Drone Detection Web App
 Receives drone data from ANTsdr via TCP, displays live positions on a map.
 """
 
-VERSION = "0.1.9"
+VERSION = "0.2.0"
 
 import argparse
 import collections
@@ -53,6 +53,15 @@ antsdr_config: dict = {
     "proximity_distance_m": 1000,
     "proximity_discord":  False,
     "proximity_cooldown_s": 60,
+    # Geofence zones — list of {id, name, color, points:[[lat,lon],...], enabled, discord, cooldown_s}
+    "geofence_zones":     [],
+    # Voice / TTS announcements (browser-side, but settings persist on the server)
+    "tts_enabled":           False,
+    "tts_announce_new":      True,
+    "tts_announce_proximity": True,
+    "tts_announce_zone":     True,
+    "tts_voice":             "",
+    "tts_rate":              1.0,
     "sensor_icon":             "📡",
     "sensor_name":             "Sensor",
     "sensor_location_source":  "gpsd",   # "gpsd" or "manual"
@@ -91,6 +100,27 @@ TEMPLATE_DIR  = Path(__file__).parent / "web"
 CONFIG_FILE   = Path(__file__).parent / "dd-config.json"
 HISTORY_FILE  = Path(__file__).parent / "history.txt"
 MAPS_DIR      = Path(__file__).parent / "maps"
+RECORDINGS_DIR = Path(__file__).parent / "recordings"
+
+# Raw-line recording state (NDJSON of {"t": unix_ts, "line": "..."})
+_recording_state = {
+    "active":    False,
+    "path":      None,         # Path | None
+    "lines":     0,
+    "started":   0.0,
+}
+_recording_lock = threading.Lock()
+
+# Replay state — a background thread feeds recorded lines through _process_line.
+_replay_state = {
+    "active":   False,
+    "file":     "",
+    "speed":    1.0,
+    "sent":     0,
+    "total":    0,
+    "started":  0.0,
+}
+_replay_stop = threading.Event()
 
 # Upstream tile URL templates — backend uses {z}/{x}/{y} regardless of provider quirks
 TILE_UPSTREAM = {
@@ -102,6 +132,40 @@ TILE_UPSTREAM = {
     "otm":            "https://tile.opentopomap.org/{z}/{x}/{y}.png",
     "google-hybrid":  "https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}",
 }
+
+
+def _sanitize_zones(raw) -> list:
+    """Coerce a list of zone dicts to a safe shape; drop anything malformed."""
+    out = []
+    if not isinstance(raw, list):
+        return out
+    for z in raw:
+        if not isinstance(z, dict):
+            continue
+        pts = z.get("points")
+        if not isinstance(pts, list) or len(pts) < 3:
+            continue
+        clean_pts = []
+        for p in pts:
+            if isinstance(p, (list, tuple)) and len(p) >= 2:
+                try:
+                    lat = float(p[0]); lon = float(p[1])
+                    if -90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0:
+                        clean_pts.append([lat, lon])
+                except (TypeError, ValueError):
+                    pass
+        if len(clean_pts) < 3:
+            continue
+        out.append({
+            "id":         str(z.get("id") or f"z{int(time.time()*1000)}{len(out)}"),
+            "name":       str(z.get("name") or "Zone")[:64],
+            "color":      str(z.get("color") or "#f85149")[:16],
+            "points":     clean_pts,
+            "enabled":    bool(z.get("enabled", True)),
+            "discord":    bool(z.get("discord", True)),
+            "cooldown_s": max(0, int(z.get("cooldown_s", 60))),
+        })
+    return out
 
 
 def load_config():
@@ -128,6 +192,12 @@ def load_config():
             "proximity_distance_m": ("proximity_distance_m", int),
             "proximity_discord":    ("proximity_discord",    bool),
             "proximity_cooldown_s": ("proximity_cooldown_s", int),
+            "tts_enabled":            ("tts_enabled",            bool),
+            "tts_announce_new":       ("tts_announce_new",       bool),
+            "tts_announce_proximity": ("tts_announce_proximity", bool),
+            "tts_announce_zone":      ("tts_announce_zone",      bool),
+            "tts_voice":              ("tts_voice",              str),
+            "tts_rate":               ("tts_rate",               float),
             "sensor_icon":             ("sensor_icon",            str),
             "sensor_name":             ("sensor_name",            str),
             "sensor_location_source":  ("sensor_location_source", str),
@@ -142,6 +212,8 @@ def load_config():
         for json_key, (cfg_key, cast) in mapping.items():
             if json_key in saved:
                 antsdr_config[cfg_key] = cast(saved[json_key])
+        if isinstance(saved.get("geofence_zones"), list):
+            antsdr_config["geofence_zones"] = _sanitize_zones(saved["geofence_zones"])
         print(f"[Config] Loaded from {CONFIG_FILE}")
     except Exception as e:
         print(f"[Config] Failed to load {CONFIG_FILE}: {e}")
@@ -167,6 +239,12 @@ def save_config():
         "proximity_distance_m": antsdr_config["proximity_distance_m"],
         "proximity_discord":    antsdr_config["proximity_discord"],
         "proximity_cooldown_s": antsdr_config["proximity_cooldown_s"],
+        "tts_enabled":            antsdr_config["tts_enabled"],
+        "tts_announce_new":       antsdr_config["tts_announce_new"],
+        "tts_announce_proximity": antsdr_config["tts_announce_proximity"],
+        "tts_announce_zone":      antsdr_config["tts_announce_zone"],
+        "tts_voice":              antsdr_config["tts_voice"],
+        "tts_rate":               antsdr_config["tts_rate"],
         "sensor_icon":            antsdr_config["sensor_icon"],
         "sensor_name":            antsdr_config["sensor_name"],
         "sensor_location_source": antsdr_config["sensor_location_source"],
@@ -177,6 +255,7 @@ def save_config():
         "tak_protocol":    antsdr_config["tak_protocol"],
         "tak_host":        antsdr_config["tak_host"],
         "tak_port":        antsdr_config["tak_port"],
+        "geofence_zones":  antsdr_config["geofence_zones"],
     }, indent=2))
 
 
@@ -473,6 +552,27 @@ _proximity_inside: dict = {}
 # Per-serial timestamp of last proximity alert sent — used to enforce cooldown.
 _proximity_last_alert: dict = {}
 
+# Per-(serial, zone_id) latch: True while drone is currently inside that zone.
+_zone_inside: dict = {}
+# Per-(serial, zone_id) timestamp of last zone alert — for cooldown.
+_zone_last_alert: dict = {}
+
+
+def _point_in_polygon(lat: float, lon: float, polygon: list) -> bool:
+    """Ray-casting point-in-polygon test on lat/lon pairs."""
+    if not polygon or len(polygon) < 3:
+        return False
+    inside = False
+    n = len(polygon)
+    j = n - 1
+    for i in range(n):
+        yi, xi = polygon[i][0], polygon[i][1]
+        yj, xj = polygon[j][0], polygon[j][1]
+        if ((yi > lat) != (yj > lat)) and (lon < (xj - xi) * (lat - yi) / ((yj - yi) or 1e-12) + xi):
+            inside = not inside
+        j = i
+    return inside
+
 
 def _haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     R = 6371000.0
@@ -552,6 +652,62 @@ def _send_discord_proximity_alert(drone: dict, distance_m: float, bearing: float
             print(f"[Discord] Proximity HTTP {e.code}: {body}")
     except Exception as e:
         print(f"[Discord] Proximity alert failed: {e}")
+
+
+def _send_discord_zone_alert(drone: dict, zone: dict):
+    """POST a geofence zone-entry embed to the configured Discord webhook."""
+    webhook = antsdr_config.get("discord_webhook", "").strip()
+    if not webhook:
+        return
+    try:
+        import urllib.request
+        import urllib.error
+
+        dlat = drone.get("drone_lat", 0)
+        dlon = drone.get("drone_lon", 0)
+
+        fields = [
+            {"name": "Serial", "value": drone.get("serial_number", "—"), "inline": True},
+            {"name": "Model",  "value": drone.get("device_type",   "—"), "inline": True},
+            {"name": "Zone",   "value": zone.get("name", "Zone"),         "inline": True},
+            {"name": "Drone",  "value": f"{dlat:.6f}, {dlon:.6f}",        "inline": True},
+            {"name": "Altitude",
+             "value": f"{drone.get('geodetic_altitude', 0):.1f} m MSL"
+                      f" / {drone.get('height_agl', 0):.1f} m AGL",
+             "inline": True},
+            {"name": "Speed",  "value": f"{drone.get('horizontal_speed', 0):.1f} m/s", "inline": True},
+        ]
+
+        # Zone color hex like "#f85149" → int 0xf85149 for embed.
+        try:
+            color_int = int((zone.get("color") or "#f85149").lstrip("#"), 16)
+        except ValueError:
+            color_int = 0xf85149
+
+        embed = {
+            "title":       f"\u26a0\ufe0f Geofence Alert: {zone.get('name', 'Zone')}",
+            "description": f"Drone entered geofence zone.\n[View on map \U0001f5fa]({_map_url(drone)})",
+            "color":       color_int,
+            "fields":      fields,
+            "footer":      {"text": f"DJI Drone Detection — {antsdr_config.get('sensor_name', 'Sensor').strip() or 'Sensor'}"},
+            "timestamp":   time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }
+
+        payload = json.dumps({"embeds": [embed]}).encode()
+        req = urllib.request.Request(
+            webhook,
+            data=payload,
+            headers={"Content-Type": "application/json", "User-Agent": "DJIDetect/1.0"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=5):
+                pass
+        except urllib.error.HTTPError as e:
+            body = e.read().decode("utf-8", errors="replace")
+            print(f"[Discord] Zone HTTP {e.code}: {body}")
+    except Exception as e:
+        print(f"[Discord] Zone alert failed: {e}")
 _discord_last_sent: dict = {} # serial -> last alert wall time
 
 
@@ -733,12 +889,178 @@ def _manual_location_broadcaster():
         broadcast({"type": "sensor", "position": pos})
 
 
+def _safe_recording_name(name: str) -> str:
+    """Strip path separators and odd characters from a user-supplied filename."""
+    name = (name or "").strip()
+    name = re.sub(r"[^A-Za-z0-9._-]", "_", name)
+    if not name:
+        name = f"rec-{int(time.time())}"
+    if not name.endswith(".ndjson"):
+        name = name + ".ndjson"
+    return name
+
+
+def _recording_start(name: str = "") -> dict:
+    """Begin appending raw lines to recordings/<name>.ndjson. Returns status."""
+    RECORDINGS_DIR.mkdir(parents=True, exist_ok=True)
+    fname = _safe_recording_name(name or time.strftime("rec-%Y%m%d-%H%M%S"))
+    path  = RECORDINGS_DIR / fname
+    with _recording_lock:
+        if _recording_state["active"]:
+            return {"ok": False, "error": "already recording", **_recording_status_unlocked()}
+        # Open in append mode so a re-used name extends the file (rare but harmless).
+        try:
+            path.open("a", encoding="utf-8").close()
+        except OSError as e:
+            return {"ok": False, "error": f"cannot open {path.name}: {e}"}
+        _recording_state["active"]  = True
+        _recording_state["path"]    = path
+        _recording_state["lines"]   = 0
+        _recording_state["started"] = time.time()
+        return {"ok": True, **_recording_status_unlocked()}
+
+
+def _recording_stop() -> dict:
+    """Stop recording and return final status."""
+    with _recording_lock:
+        if not _recording_state["active"]:
+            return {"ok": False, "error": "not recording"}
+        _recording_state["active"] = False
+        path = _recording_state["path"]
+        lines = _recording_state["lines"]
+        _recording_state["path"] = None
+        return {"ok": True, "file": path.name if path else "", "lines": lines}
+
+
+def _recording_status_unlocked() -> dict:
+    p = _recording_state.get("path")
+    return {
+        "active":  bool(_recording_state.get("active")),
+        "file":    p.name if p else "",
+        "lines":   int(_recording_state.get("lines", 0)),
+        "started": float(_recording_state.get("started", 0.0)),
+    }
+
+
+def _recording_status() -> dict:
+    with _recording_lock:
+        return _recording_status_unlocked()
+
+
+def _replay_status() -> dict:
+    return {
+        "active":  bool(_replay_state.get("active")),
+        "file":    _replay_state.get("file", ""),
+        "speed":   float(_replay_state.get("speed", 1.0)),
+        "sent":    int(_replay_state.get("sent", 0)),
+        "total":   int(_replay_state.get("total", 0)),
+        "started": float(_replay_state.get("started", 0.0)),
+    }
+
+
+def _replay_thread(path: Path, speed: float):
+    """Read NDJSON recording and feed each line through _process_line at recorded pacing."""
+    speed = max(0.1, min(50.0, float(speed)))
+    sent = 0
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            entries = []
+            for raw in f:
+                raw = raw.strip()
+                if not raw:
+                    continue
+                try:
+                    obj = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+                line = obj.get("line")
+                if not isinstance(line, str):
+                    continue
+                t = obj.get("t")
+                try:
+                    t = float(t)
+                except (TypeError, ValueError):
+                    t = 0.0
+                entries.append((t, line))
+        _replay_state["total"] = len(entries)
+        broadcast({"type": "replay_status", **_replay_status()})
+
+        prev_t = entries[0][0] if entries else 0.0
+        for t, line in entries:
+            if _replay_stop.is_set():
+                break
+            dt = max(0.0, (t - prev_t) / speed)
+            prev_t = t
+            if dt > 0:
+                # Sleep in small steps so stop is responsive.
+                deadline = time.time() + dt
+                while time.time() < deadline:
+                    if _replay_stop.is_set():
+                        break
+                    time.sleep(min(0.1, deadline - time.time()))
+                if _replay_stop.is_set():
+                    break
+            _process_line(line + "\n")
+            sent += 1
+            _replay_state["sent"] = sent
+            if sent % 25 == 0:
+                broadcast({"type": "replay_status", **_replay_status()})
+    except Exception as e:
+        print(f"[Replay] Error: {e}")
+    finally:
+        _replay_state["active"] = False
+        _replay_state["sent"] = sent
+        broadcast({"type": "replay_status", **_replay_status()})
+
+
+def _replay_start(filename: str, speed: float = 1.0) -> dict:
+    if _replay_state["active"]:
+        return {"ok": False, "error": "already replaying", **_replay_status()}
+    fname = _safe_recording_name(filename)
+    path = RECORDINGS_DIR / fname
+    if not path.exists() or not path.is_file():
+        return {"ok": False, "error": f"no such recording: {fname}"}
+    _replay_stop.clear()
+    _replay_state["active"]  = True
+    _replay_state["file"]    = fname
+    _replay_state["speed"]   = float(speed)
+    _replay_state["sent"]    = 0
+    _replay_state["total"]   = 0
+    _replay_state["started"] = time.time()
+    threading.Thread(
+        target=_replay_thread,
+        args=(path, float(speed)),
+        daemon=True,
+        name=f"replay-{fname}",
+    ).start()
+    return {"ok": True, **_replay_status()}
+
+
+def _replay_stop_now() -> dict:
+    if not _replay_state["active"]:
+        return {"ok": False, "error": "not replaying"}
+    _replay_stop.set()
+    return {"ok": True, **_replay_status()}
+
+
 def _process_line(line: str):
     """Record raw line, update drone_data, and fire Discord/TAK notifications."""
     global _history_last_saved
     now = time.time()
+    stripped = line.rstrip()
     with data_lock:
-        raw_lines.append({"t": now, "line": line.rstrip()})
+        raw_lines.append({"t": now, "line": stripped})
+    # Recording — append-only NDJSON, written under its own lock to avoid blocking parse.
+    with _recording_lock:
+        if _recording_state["active"] and _recording_state["path"]:
+            try:
+                with _recording_state["path"].open("a", encoding="utf-8") as rf:
+                    rf.write(json.dumps({"t": now, "line": stripped}) + "\n")
+                _recording_state["lines"] = int(_recording_state.get("lines", 0)) + 1
+            except OSError as e:
+                print(f"[Record] Write failed, stopping: {e}")
+                _recording_state["active"] = False
+                _recording_state["path"] = None
     data = _parse_antsdr_line(line)
     if not data or not data.get("serial_number"):
         return
@@ -788,6 +1110,39 @@ def _process_line(line: str):
         else:
             _proximity_inside.pop(sn, None)
             _proximity_last_alert.pop(sn, None)
+
+    # Geofence zones — point-in-polygon per zone, per-(serial, zone) latch + cooldown.
+    dlat_z = data.get("drone_lat", 0)
+    dlon_z = data.get("drone_lon", 0)
+    if dlat_z and dlon_z:
+        zones = antsdr_config.get("geofence_zones") or []
+        for zone in zones:
+            if not zone.get("enabled"):
+                continue
+            zid = zone.get("id")
+            if not zid:
+                continue
+            inside = _point_in_polygon(dlat_z, dlon_z, zone.get("points") or [])
+            key = (sn, zid)
+            was_inside = _zone_inside.get(key, False)
+            _zone_inside[key] = inside
+            if inside:
+                broadcast({"type": "zone_status", "serial": sn, "zone_id": zid, "inside": True})
+                if zone.get("discord"):
+                    cooldown = max(0, int(zone.get("cooldown_s", 60)))
+                    now = time.time()
+                    last = _zone_last_alert.get(key, 0)
+                    if not was_inside or (now - last) >= cooldown * 2:
+                        _zone_last_alert[key] = now
+                        broadcast({"type": "zone_alert", "drone": snapshot, "zone": zone})
+                        _io_executor.submit(_send_discord_zone_alert, snapshot, zone)
+            elif was_inside:
+                broadcast({"type": "zone_status", "serial": sn, "zone_id": zid, "inside": False})
+    else:
+        # Drop all zone state for this drone when GPS is invalid.
+        for key in [k for k in _zone_inside if k[0] == sn]:
+            _zone_inside.pop(key, None)
+            _zone_last_alert.pop(key, None)
 
     # TAK — every detection message
     _io_executor.submit(_send_tak, snapshot)
@@ -940,6 +1295,9 @@ def stale_cleaner():
                 _discord_last_sent.pop(serial, None)
                 _proximity_inside.pop(serial, None)
                 _proximity_last_alert.pop(serial, None)
+                for key in [k for k in _zone_inside if k[0] == serial]:
+                    _zone_inside.pop(key, None)
+                    _zone_last_alert.pop(key, None)
                 broadcast({"type": "remove", "serial": serial})
 
 
@@ -1112,6 +1470,12 @@ def handle_config_get(start_response):
             "proximity_distance_m": antsdr_config["proximity_distance_m"],
             "proximity_discord":    antsdr_config["proximity_discord"],
             "proximity_cooldown_s": antsdr_config["proximity_cooldown_s"],
+            "tts_enabled":            antsdr_config["tts_enabled"],
+            "tts_announce_new":       antsdr_config["tts_announce_new"],
+            "tts_announce_proximity": antsdr_config["tts_announce_proximity"],
+            "tts_announce_zone":      antsdr_config["tts_announce_zone"],
+            "tts_voice":              antsdr_config["tts_voice"],
+            "tts_rate":               antsdr_config["tts_rate"],
             "sensor_icon":            antsdr_config["sensor_icon"],
             "sensor_name":            antsdr_config["sensor_name"],
             "sensor_location_source": antsdr_config["sensor_location_source"],
@@ -1122,6 +1486,7 @@ def handle_config_get(start_response):
             "tak_protocol":    antsdr_config["tak_protocol"],
             "tak_host":        antsdr_config["tak_host"],
             "tak_port":        antsdr_config["tak_port"],
+            "geofence_zones":  antsdr_config["geofence_zones"],
         }).encode()
     start_response("200 OK", [
         ("Content-Type", "application/json"),
@@ -1166,6 +1531,12 @@ def handle_config_post(environ, start_response):
         antsdr_config["proximity_distance_m"] = max(10, int(body.get("proximity_distance_m", antsdr_config["proximity_distance_m"])))
         antsdr_config["proximity_discord"]    = bool(body.get("proximity_discord",    antsdr_config["proximity_discord"]))
         antsdr_config["proximity_cooldown_s"] = max(0, int(body.get("proximity_cooldown_s", antsdr_config["proximity_cooldown_s"])))
+        antsdr_config["tts_enabled"]            = bool(body.get("tts_enabled",            antsdr_config["tts_enabled"]))
+        antsdr_config["tts_announce_new"]       = bool(body.get("tts_announce_new",       antsdr_config["tts_announce_new"]))
+        antsdr_config["tts_announce_proximity"] = bool(body.get("tts_announce_proximity", antsdr_config["tts_announce_proximity"]))
+        antsdr_config["tts_announce_zone"]      = bool(body.get("tts_announce_zone",      antsdr_config["tts_announce_zone"]))
+        antsdr_config["tts_voice"]              = str(body.get("tts_voice",               antsdr_config["tts_voice"]))
+        antsdr_config["tts_rate"]               = max(0.5, min(2.0, float(body.get("tts_rate", antsdr_config["tts_rate"]))))
         antsdr_config["sensor_icon"]            = str(body.get("sensor_icon",            antsdr_config["sensor_icon"]))
         antsdr_config["sensor_name"]            = str(body.get("sensor_name",            antsdr_config["sensor_name"])).strip()
         antsdr_config["sensor_location_source"] = str(body.get("sensor_location_source", antsdr_config["sensor_location_source"]))
@@ -1186,6 +1557,8 @@ def handle_config_post(environ, start_response):
         antsdr_config["tak_protocol"]    = str(body.get("tak_protocol",    antsdr_config["tak_protocol"])).strip()
         antsdr_config["tak_host"]        = str(body.get("tak_host",        antsdr_config["tak_host"])).strip()
         antsdr_config["tak_port"]        = int(body.get("tak_port",        antsdr_config["tak_port"]))
+        if "geofence_zones" in body:
+            antsdr_config["geofence_zones"] = _sanitize_zones(body.get("geofence_zones"))
         save_config()
         if body.get("reconnect", True):
             antsdr_reconnect.set()
@@ -1196,6 +1569,32 @@ def handle_config_post(environ, start_response):
     except Exception as e:
         resp = json.dumps({"ok": False, "error": str(e)}).encode()
         start_response("400 Bad Request", [("Content-Type", "application/json"), ("Content-Length", str(len(resp)))])
+        return [resp]
+
+
+def handle_zones_get(start_response):
+    with data_lock:
+        body = json.dumps({"zones": antsdr_config["geofence_zones"]}).encode()
+    start_response("200 OK", [("Content-Type", "application/json"),
+                               ("Content-Length", str(len(body)))])
+    return [body]
+
+
+def handle_zones_post(environ, start_response):
+    try:
+        length = int(environ.get("CONTENT_LENGTH", 0))
+        body   = json.loads(environ["wsgi.input"].read(length))
+        zones  = _sanitize_zones(body.get("zones") if isinstance(body, dict) else body)
+        antsdr_config["geofence_zones"] = zones
+        save_config()
+        resp = json.dumps({"ok": True, "count": len(zones)}).encode()
+        start_response("200 OK", [("Content-Type", "application/json"),
+                                   ("Content-Length", str(len(resp)))])
+        return [resp]
+    except Exception as e:
+        resp = json.dumps({"ok": False, "error": str(e)}).encode()
+        start_response("400 Bad Request", [("Content-Type", "application/json"),
+                                            ("Content-Length", str(len(resp)))])
         return [resp]
 
 
@@ -1276,6 +1675,166 @@ def handle_history(environ, start_response):
             return [body]
     start_response("405 Method Not Allowed", [("Content-Type", "text/plain")])
     return [b"Method Not Allowed"]
+
+
+def _json_response(start_response, payload, status="200 OK"):
+    body = json.dumps(payload).encode()
+    start_response(status, [("Content-Type", "application/json"),
+                             ("Content-Length", str(len(body)))])
+    return [body]
+
+
+def handle_record_status(start_response):
+    return _json_response(start_response, {
+        "recording": _recording_status(),
+        "replay":    _replay_status(),
+    })
+
+
+def handle_record_list(start_response):
+    RECORDINGS_DIR.mkdir(parents=True, exist_ok=True)
+    items = []
+    for p in sorted(RECORDINGS_DIR.glob("*.ndjson")):
+        try:
+            st = p.stat()
+        except OSError:
+            continue
+        # Cheap line count — only for small files; avoid scanning huge captures.
+        lines = None
+        try:
+            if st.st_size < 50 * 1024 * 1024:
+                with p.open("rb") as f:
+                    lines = sum(1 for _ in f)
+        except OSError:
+            pass
+        items.append({
+            "name":  p.name,
+            "size":  st.st_size,
+            "mtime": st.st_mtime,
+            "lines": lines,
+        })
+    return _json_response(start_response, {"files": items})
+
+
+def handle_record_start(environ, start_response):
+    try:
+        length = int(environ.get("CONTENT_LENGTH", 0) or 0)
+    except ValueError:
+        length = 0
+    name = ""
+    if length > 0:
+        try:
+            body = json.loads(environ["wsgi.input"].read(length) or b"{}")
+            if isinstance(body, dict):
+                name = str(body.get("name", "") or "")
+        except (ValueError, json.JSONDecodeError):
+            pass
+    result = _recording_start(name)
+    return _json_response(start_response, result, "200 OK" if result.get("ok") else "400 Bad Request")
+
+
+def handle_record_stop(start_response):
+    result = _recording_stop()
+    return _json_response(start_response, result, "200 OK" if result.get("ok") else "400 Bad Request")
+
+
+def handle_record_download(name, start_response):
+    fname = _safe_recording_name(name)
+    path = RECORDINGS_DIR / fname
+    if not path.exists() or not path.is_file():
+        start_response("404 Not Found", [("Content-Type", "text/plain")])
+        return [b"Not Found"]
+    data = path.read_bytes()
+    start_response("200 OK", [
+        ("Content-Type", "application/x-ndjson"),
+        ("Content-Length", str(len(data))),
+        ("Content-Disposition", f'attachment; filename="{fname}"'),
+    ])
+    return [data]
+
+
+def handle_record_delete(environ, start_response):
+    try:
+        length = int(environ.get("CONTENT_LENGTH", 0) or 0)
+        body = json.loads(environ["wsgi.input"].read(length) or b"{}")
+        name = str(body.get("name", "") or "") if isinstance(body, dict) else ""
+        if not name:
+            return _json_response(start_response, {"ok": False, "error": "missing name"}, "400 Bad Request")
+        fname = _safe_recording_name(name)
+        path = RECORDINGS_DIR / fname
+        # Refuse to delete the file currently being recorded.
+        with _recording_lock:
+            if _recording_state["active"] and _recording_state["path"] == path:
+                return _json_response(start_response, {"ok": False, "error": "currently recording"}, "400 Bad Request")
+        if _replay_state["active"] and _replay_state.get("file") == fname:
+            return _json_response(start_response, {"ok": False, "error": "currently replaying"}, "400 Bad Request")
+        if not path.exists():
+            return _json_response(start_response, {"ok": False, "error": "not found"}, "404 Not Found")
+        path.unlink()
+        return _json_response(start_response, {"ok": True, "name": fname})
+    except Exception as e:
+        return _json_response(start_response, {"ok": False, "error": str(e)}, "400 Bad Request")
+
+
+def handle_record_upload(environ, start_response):
+    """Accept an NDJSON body and save under recordings/. Filename from ?name= or X-Filename."""
+    try:
+        length = int(environ.get("CONTENT_LENGTH", 0) or 0)
+        if length <= 0 or length > 200 * 1024 * 1024:
+            return _json_response(start_response, {"ok": False, "error": "invalid length"}, "400 Bad Request")
+        raw = environ["wsgi.input"].read(length)
+        # Filename: prefer ?name= query, else X-Filename header, else timestamp.
+        qs = environ.get("QUERY_STRING", "") or ""
+        name = ""
+        for part in qs.split("&"):
+            if part.startswith("name="):
+                from urllib.parse import unquote
+                name = unquote(part[5:])
+                break
+        if not name:
+            name = environ.get("HTTP_X_FILENAME", "") or time.strftime("upload-%Y%m%d-%H%M%S")
+        fname = _safe_recording_name(name)
+        RECORDINGS_DIR.mkdir(parents=True, exist_ok=True)
+        path = RECORDINGS_DIR / fname
+        # Light validation — must be NDJSON with at least one parsable {t,line} entry.
+        ok_lines = 0
+        for ln in raw.splitlines():
+            ln = ln.strip()
+            if not ln:
+                continue
+            try:
+                obj = json.loads(ln)
+                if isinstance(obj, dict) and "line" in obj:
+                    ok_lines += 1
+            except (ValueError, json.JSONDecodeError):
+                continue
+        if ok_lines == 0:
+            return _json_response(start_response, {"ok": False, "error": "no valid NDJSON entries"}, "400 Bad Request")
+        path.write_bytes(raw)
+        return _json_response(start_response, {"ok": True, "name": fname, "lines": ok_lines})
+    except Exception as e:
+        return _json_response(start_response, {"ok": False, "error": str(e)}, "400 Bad Request")
+
+
+def handle_record_replay_start(environ, start_response):
+    try:
+        length = int(environ.get("CONTENT_LENGTH", 0) or 0)
+        body = json.loads(environ["wsgi.input"].read(length) or b"{}") if length else {}
+        if not isinstance(body, dict):
+            body = {}
+        name = str(body.get("name", "") or "")
+        speed = float(body.get("speed", 1.0))
+    except (ValueError, json.JSONDecodeError, TypeError):
+        return _json_response(start_response, {"ok": False, "error": "bad request"}, "400 Bad Request")
+    if not name:
+        return _json_response(start_response, {"ok": False, "error": "missing name"}, "400 Bad Request")
+    result = _replay_start(name, speed)
+    return _json_response(start_response, result, "200 OK" if result.get("ok") else "400 Bad Request")
+
+
+def handle_record_replay_stop(start_response):
+    result = _replay_stop_now()
+    return _json_response(start_response, result, "200 OK" if result.get("ok") else "400 Bad Request")
 
 
 def handle_not_found(start_response):
@@ -1531,6 +2090,10 @@ def application(environ, start_response):
         if method == "GET":  return handle_config_get(start_response)
         if method == "POST": return handle_config_post(environ, start_response)
 
+    if path == "/zones":
+        if method == "GET":  return handle_zones_get(start_response)
+        if method == "POST": return handle_zones_post(environ, start_response)
+
     if path == "/map-cache":
         return handle_map_cache(environ, start_response)
 
@@ -1545,6 +2108,26 @@ def application(environ, start_response):
 
     if path == "/update-restart" and method == "POST":
         return handle_update_restart(start_response)
+
+    # Record / replay
+    if path == "/record/status" and method == "GET":
+        return handle_record_status(start_response)
+    if path == "/record/list" and method == "GET":
+        return handle_record_list(start_response)
+    if path == "/record/start" and method == "POST":
+        return handle_record_start(environ, start_response)
+    if path == "/record/stop" and method == "POST":
+        return handle_record_stop(start_response)
+    if path == "/record/delete" and method == "POST":
+        return handle_record_delete(environ, start_response)
+    if path == "/record/upload" and method == "POST":
+        return handle_record_upload(environ, start_response)
+    if path == "/record/replay/start" and method == "POST":
+        return handle_record_replay_start(environ, start_response)
+    if path == "/record/replay/stop" and method == "POST":
+        return handle_record_replay_stop(start_response)
+    if path.startswith("/record/download/") and method == "GET":
+        return handle_record_download(path[len("/record/download/"):], start_response)
 
     # Tile proxy: /tiles/{style}/{z}/{x}/{y}
     if path.startswith("/tiles/"):
@@ -1588,6 +2171,8 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     STALE_TIMEOUT = args.stale_timeout
+
+    RECORDINGS_DIR.mkdir(parents=True, exist_ok=True)
 
     # Load saved config first, then let CLI args override if explicitly provided
     load_config()
