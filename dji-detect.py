@@ -880,6 +880,8 @@ def _manual_location_broadcaster():
         time.sleep(30)
         if antsdr_config.get("sensor_location_source") != "manual":
             continue
+        if _replay_state.get("active"):
+            continue
         with data_lock:
             if sensor_position.get("lat") and sensor_position.get("lon"):
                 sensor_position["last_fix_wall_time"] = time.time()
@@ -949,12 +951,15 @@ def _recording_status() -> dict:
 
 def _replay_status() -> dict:
     return {
-        "active":  bool(_replay_state.get("active")),
-        "file":    _replay_state.get("file", ""),
-        "speed":   float(_replay_state.get("speed", 1.0)),
-        "sent":    int(_replay_state.get("sent", 0)),
-        "total":   int(_replay_state.get("total", 0)),
-        "started": float(_replay_state.get("started", 0.0)),
+        "active":       bool(_replay_state.get("active")),
+        "file":         _replay_state.get("file", ""),
+        "speed":        float(_replay_state.get("speed", 1.0)),
+        "sent":         int(_replay_state.get("sent", 0)),
+        "total":        int(_replay_state.get("total", 0)),
+        "started":      float(_replay_state.get("started", 0.0)),
+        "recorded_start": float(_replay_state.get("recorded_start", 0.0)),
+        "recorded_end":   float(_replay_state.get("recorded_end", 0.0)),
+        "recorded_now":   float(_replay_state.get("recorded_now", 0.0)),
     }
 
 
@@ -962,6 +967,10 @@ def _replay_thread(path: Path, speed: float):
     """Read NDJSON recording and feed each line through _process_line at recorded pacing."""
     speed = max(0.1, min(50.0, float(speed)))
     sent = 0
+    # Snapshot live sensor position so we can restore it when replay finishes.
+    with data_lock:
+        saved_sensor = sensor_position.copy() if sensor_position else {}
+    last_replayed_sensor: tuple | None = None
     try:
         with path.open("r", encoding="utf-8") as f:
             entries = []
@@ -981,12 +990,15 @@ def _replay_thread(path: Path, speed: float):
                     t = float(t)
                 except (TypeError, ValueError):
                     t = 0.0
-                entries.append((t, line))
+                entries.append((t, line, obj.get("sensor")))
         _replay_state["total"] = len(entries)
+        if entries:
+            _replay_state["recorded_start"] = entries[0][0]
+            _replay_state["recorded_end"]   = entries[-1][0]
         broadcast({"type": "replay_status", **_replay_status()})
 
         prev_t = entries[0][0] if entries else 0.0
-        for t, line in entries:
+        for t, line, sensor in entries:
             if _replay_stop.is_set():
                 break
             dt = max(0.0, (t - prev_t) / speed)
@@ -1000,9 +1012,30 @@ def _replay_thread(path: Path, speed: float):
                     time.sleep(min(0.1, deadline - time.time()))
                 if _replay_stop.is_set():
                     break
+            # Apply recorded sensor position, only broadcasting when it changes.
+            if isinstance(sensor, dict):
+                slat = sensor.get("lat"); slon = sensor.get("lon")
+                if slat is not None and slon is not None:
+                    pos = {
+                        "mode": 3 if sensor.get("alt") is not None else 2,
+                        "lat":  slat,
+                        "lon":  slon,
+                        "alt":  sensor.get("alt"),
+                        "sats_used":          0,
+                        "sats_visible":       0,
+                        "gps_time":           None,
+                        "last_fix_wall_time": time.time(),
+                    }
+                    key = (slat, slon, pos["alt"])
+                    if key != last_replayed_sensor:
+                        last_replayed_sensor = key
+                        with data_lock:
+                            sensor_position.update(pos)
+                        broadcast({"type": "sensor", "position": pos})
             _process_line(line + "\n")
             sent += 1
             _replay_state["sent"] = sent
+            _replay_state["recorded_now"] = t
             if sent % 25 == 0:
                 broadcast({"type": "replay_status", **_replay_status()})
     except Exception as e:
@@ -1010,6 +1043,12 @@ def _replay_thread(path: Path, speed: float):
     finally:
         _replay_state["active"] = False
         _replay_state["sent"] = sent
+        # Restore live sensor position so the map snaps back to the real fix.
+        if saved_sensor:
+            with data_lock:
+                sensor_position.clear()
+                sensor_position.update(saved_sensor)
+            broadcast({"type": "sensor", "position": saved_sensor})
         broadcast({"type": "replay_status", **_replay_status()})
 
 
@@ -1027,6 +1066,9 @@ def _replay_start(filename: str, speed: float = 1.0) -> dict:
     _replay_state["sent"]    = 0
     _replay_state["total"]   = 0
     _replay_state["started"] = time.time()
+    _replay_state["recorded_start"] = 0.0
+    _replay_state["recorded_end"]   = 0.0
+    _replay_state["recorded_now"]   = 0.0
     threading.Thread(
         target=_replay_thread,
         args=(path, float(speed)),
@@ -1050,12 +1092,21 @@ def _process_line(line: str):
     stripped = line.rstrip()
     with data_lock:
         raw_lines.append({"t": now, "line": stripped})
+        # Snapshot sensor position so each recorded line carries where we were when received.
+        s_lat = sensor_position.get("lat")
+        s_lon = sensor_position.get("lon")
+        s_alt = sensor_position.get("alt")
     # Recording — append-only NDJSON, written under its own lock to avoid blocking parse.
     with _recording_lock:
         if _recording_state["active"] and _recording_state["path"]:
+            entry = {"t": now, "line": stripped}
+            if s_lat is not None and s_lon is not None:
+                entry["sensor"] = {"lat": s_lat, "lon": s_lon}
+                if s_alt is not None:
+                    entry["sensor"]["alt"] = s_alt
             try:
                 with _recording_state["path"].open("a", encoding="utf-8") as rf:
-                    rf.write(json.dumps({"t": now, "line": stripped}) + "\n")
+                    rf.write(json.dumps(entry) + "\n")
                 _recording_state["lines"] = int(_recording_state.get("lines", 0)) + 1
             except OSError as e:
                 print(f"[Record] Write failed, stopping: {e}")
@@ -1359,7 +1410,8 @@ def gpsd_poller(host: str, port: int):
                     "last_fix_wall_time": last_fix_wall_time or None,
                 }
 
-                if antsdr_config.get("sensor_location_source", "gpsd") == "gpsd":
+                if antsdr_config.get("sensor_location_source", "gpsd") == "gpsd" \
+                        and not _replay_state.get("active"):
                     with data_lock:
                         sensor_position.update(pos)
                     broadcast({"type": "sensor", "position": pos})
@@ -1701,17 +1753,29 @@ def handle_record_list(start_response):
             continue
         # Cheap line count — only for small files; avoid scanning huge captures.
         lines = None
+        recorded_start = None
         try:
             if st.st_size < 50 * 1024 * 1024:
-                with p.open("rb") as f:
-                    lines = sum(1 for _ in f)
+                with p.open("r", encoding="utf-8") as f:
+                    first = f.readline()
+                    if first:
+                        try:
+                            obj = json.loads(first)
+                            if isinstance(obj, dict):
+                                recorded_start = float(obj.get("t", 0)) or None
+                        except (ValueError, json.JSONDecodeError):
+                            pass
+                    lines = 1 if first else 0
+                    for _ in f:
+                        lines += 1
         except OSError:
             pass
         items.append({
-            "name":  p.name,
-            "size":  st.st_size,
-            "mtime": st.st_mtime,
-            "lines": lines,
+            "name":           p.name,
+            "size":           st.st_size,
+            "mtime":          st.st_mtime,
+            "lines":          lines,
+            "recorded_start": recorded_start,
         })
     return _json_response(start_response, {"files": items})
 

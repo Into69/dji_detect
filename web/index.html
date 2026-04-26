@@ -2777,13 +2777,16 @@ function renderRecordingsList(files) {
     const playBtn = isPlaying
       ? `<button class="cfg-btn rec-stop" data-name="${escHtml(f.name)}">■ Stop</button>`
       : `<button class="cfg-btn rec-play" data-name="${escHtml(f.name)}">▶ Replay</button>`;
+    const recordedAt = f.recorded_start
+      ? `Recorded ${fmtMtime(f.recorded_start)}`
+      : fmtMtime(f.mtime);
     return `
       <div style="border:1px solid #30363d;border-radius:6px;padding:8px;display:flex;flex-direction:column;gap:4px">
         <div style="display:flex;justify-content:space-between;gap:8px;align-items:center">
           <div style="font-weight:600;font-size:12px;word-break:break-all">${escHtml(f.name)}</div>
           <div style="font-size:11px;color:#6e7681;white-space:nowrap">${fmtBytes(f.size)}${lines}</div>
         </div>
-        <div style="font-size:11px;color:#6e7681">${fmtMtime(f.mtime)}</div>
+        <div style="font-size:11px;color:#6e7681">${escHtml(recordedAt)}</div>
         <div class="cfg-btn-row" style="margin-top:4px">
           ${playBtn}
           <button class="cfg-btn rec-download" data-name="${escHtml(f.name)}">Download</button>
@@ -2809,11 +2812,19 @@ function renderRecordingsList(files) {
 }
 
 let _replayLast = { active: false };
+function fmtRecTime(ts) {
+  if (!ts) return '';
+  return new Date(ts * 1000).toLocaleString();
+}
+
 function updateReplayStatus(s) {
   _replayLast = s || { active: false };
   if (s && s.active) {
     const pct = s.total ? Math.floor((s.sent / s.total) * 100) : 0;
-    recReplayEl.textContent = `Replaying ${s.file} @ ${s.speed}× — ${s.sent}/${s.total || '?'} (${pct}%)`;
+    let line = `Replaying ${s.file} @ ${s.speed}× — ${s.sent}/${s.total || '?'} (${pct}%)`;
+    if (s.recorded_now) line += `<br><span style="color:#8b949e">Recorded: ${escHtml(fmtRecTime(s.recorded_now))}</span>`;
+    else if (s.recorded_start) line += `<br><span style="color:#8b949e">Recorded: ${escHtml(fmtRecTime(s.recorded_start))}</span>`;
+    recReplayEl.innerHTML = line;
     recReplayEl.style.color = '#58a6ff';
   } else {
     recReplayEl.textContent = '';
