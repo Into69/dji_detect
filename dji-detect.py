@@ -6,6 +6,7 @@ Receives drone data from ANTsdr via TCP, displays live positions on a map.
 VERSION = "0.2.0"
 
 import argparse
+import bisect
 import collections
 import json
 import math
@@ -48,6 +49,7 @@ antsdr_config: dict = {
     "range_rings":     False,
     "range_ring_color":   "#3fb950",
     "range_ring_opacity": 0.7,
+    "range_ring_radii_m": [500, 1000, 2000, 5000, 10000],
     "show_trails":     True,
     "proximity_alerts":   False,
     "proximity_distance_m": 1000,
@@ -168,6 +170,24 @@ def _sanitize_zones(raw) -> list:
     return out
 
 
+def _sanitize_ring_radii(raw) -> list:
+    """Coerce a list of ring radii (meters) to a sorted, deduped list of ints in [1, 500_000]."""
+    if not isinstance(raw, list):
+        return list(antsdr_config.get("range_ring_radii_m") or [])
+    seen = set()
+    out = []
+    for v in raw:
+        try:
+            n = int(round(float(v)))
+        except (TypeError, ValueError):
+            continue
+        if 1 <= n <= 500_000 and n not in seen:
+            seen.add(n)
+            out.append(n)
+    out.sort()
+    return out[:20]  # cap to keep the map sane
+
+
 def load_config():
     """Load persisted settings from dd-config.json (if it exists)."""
     if not CONFIG_FILE.exists():
@@ -214,6 +234,8 @@ def load_config():
                 antsdr_config[cfg_key] = cast(saved[json_key])
         if isinstance(saved.get("geofence_zones"), list):
             antsdr_config["geofence_zones"] = _sanitize_zones(saved["geofence_zones"])
+        if isinstance(saved.get("range_ring_radii_m"), list):
+            antsdr_config["range_ring_radii_m"] = _sanitize_ring_radii(saved["range_ring_radii_m"])
         print(f"[Config] Loaded from {CONFIG_FILE}")
     except Exception as e:
         print(f"[Config] Failed to load {CONFIG_FILE}: {e}")
@@ -234,6 +256,7 @@ def save_config():
         "range_rings":     antsdr_config["range_rings"],
         "range_ring_color":   antsdr_config["range_ring_color"],
         "range_ring_opacity": antsdr_config["range_ring_opacity"],
+        "range_ring_radii_m": antsdr_config["range_ring_radii_m"],
         "show_trails":     antsdr_config["show_trails"],
         "proximity_alerts":     antsdr_config["proximity_alerts"],
         "proximity_distance_m": antsdr_config["proximity_distance_m"],
@@ -991,27 +1014,73 @@ def _replay_thread(path: Path, speed: float):
                 except (TypeError, ValueError):
                     t = 0.0
                 entries.append((t, line, obj.get("sensor")))
-        _replay_state["total"] = len(entries)
+        n = len(entries)
+        ts_list = [e[0] for e in entries]
+        _replay_state["total"] = n
         if entries:
             _replay_state["recorded_start"] = entries[0][0]
             _replay_state["recorded_end"]   = entries[-1][0]
         broadcast({"type": "replay_status", **_replay_status()})
 
+        i = 0
         prev_t = entries[0][0] if entries else 0.0
-        for t, line, sensor in entries:
+        while i < n:
             if _replay_stop.is_set():
                 break
+
+            # Pending scrub — jump the cursor and apply the most recent sensor up to target.
+            seek_to = _replay_state.get("seek_to")
+            if seek_to is not None:
+                _replay_state["seek_to"] = None
+                try:
+                    target = float(seek_to)
+                except (TypeError, ValueError):
+                    target = entries[i][0]
+                target_idx = bisect.bisect_left(ts_list, target)
+                target_idx = max(0, min(n - 1, target_idx))
+                latest_sensor = None
+                for j in range(target_idx + 1):
+                    if isinstance(entries[j][2], dict):
+                        latest_sensor = entries[j][2]
+                if isinstance(latest_sensor, dict):
+                    slat = latest_sensor.get("lat"); slon = latest_sensor.get("lon")
+                    if slat is not None and slon is not None:
+                        pos = {
+                            "mode": 3 if latest_sensor.get("alt") is not None else 2,
+                            "lat":  slat,
+                            "lon":  slon,
+                            "alt":  latest_sensor.get("alt"),
+                            "sats_used":          0,
+                            "sats_visible":       0,
+                            "gps_time":           None,
+                            "last_fix_wall_time": time.time(),
+                        }
+                        last_replayed_sensor = (slat, slon, pos["alt"])
+                        with data_lock:
+                            sensor_position.update(pos)
+                        broadcast({"type": "sensor", "position": pos})
+                i = target_idx
+                prev_t = entries[i][0]
+                sent = i
+                _replay_state["sent"] = sent
+                _replay_state["recorded_now"] = entries[i][0]
+                broadcast({"type": "replay_status", **_replay_status()})
+                continue
+
+            t, line, sensor = entries[i]
             dt = max(0.0, (t - prev_t) / speed)
             prev_t = t
             if dt > 0:
-                # Sleep in small steps so stop is responsive.
+                # Sleep in small steps so stop/seek are responsive.
                 deadline = time.time() + dt
                 while time.time() < deadline:
-                    if _replay_stop.is_set():
+                    if _replay_stop.is_set() or _replay_state.get("seek_to") is not None:
                         break
                     time.sleep(min(0.1, deadline - time.time()))
                 if _replay_stop.is_set():
                     break
+                if _replay_state.get("seek_to") is not None:
+                    continue
             # Apply recorded sensor position, only broadcasting when it changes.
             if isinstance(sensor, dict):
                 slat = sensor.get("lat"); slon = sensor.get("lon")
@@ -1033,7 +1102,8 @@ def _replay_thread(path: Path, speed: float):
                             sensor_position.update(pos)
                         broadcast({"type": "sensor", "position": pos})
             _process_line(line + "\n")
-            sent += 1
+            i += 1
+            sent = i
             _replay_state["sent"] = sent
             _replay_state["recorded_now"] = t
             if sent % 25 == 0:
@@ -1043,6 +1113,7 @@ def _replay_thread(path: Path, speed: float):
     finally:
         _replay_state["active"] = False
         _replay_state["sent"] = sent
+        _replay_state["seek_to"] = None
         # Restore live sensor position so the map snaps back to the real fix.
         if saved_sensor:
             with data_lock:
@@ -1069,6 +1140,7 @@ def _replay_start(filename: str, speed: float = 1.0) -> dict:
     _replay_state["recorded_start"] = 0.0
     _replay_state["recorded_end"]   = 0.0
     _replay_state["recorded_now"]   = 0.0
+    _replay_state["seek_to"]        = None
     threading.Thread(
         target=_replay_thread,
         args=(path, float(speed)),
@@ -1082,6 +1154,17 @@ def _replay_stop_now() -> dict:
     if not _replay_state["active"]:
         return {"ok": False, "error": "not replaying"}
     _replay_stop.set()
+    return {"ok": True, **_replay_status()}
+
+
+def _replay_seek(target_t: float) -> dict:
+    if not _replay_state.get("active"):
+        return {"ok": False, "error": "not replaying"}
+    try:
+        target_t = float(target_t)
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "bad target"}
+    _replay_state["seek_to"] = target_t
     return {"ok": True, **_replay_status()}
 
 
@@ -1517,6 +1600,7 @@ def handle_config_get(start_response):
             "range_rings":     antsdr_config["range_rings"],
             "range_ring_color":   antsdr_config["range_ring_color"],
             "range_ring_opacity": antsdr_config["range_ring_opacity"],
+            "range_ring_radii_m": antsdr_config["range_ring_radii_m"],
             "show_trails":     antsdr_config["show_trails"],
             "proximity_alerts":     antsdr_config["proximity_alerts"],
             "proximity_distance_m": antsdr_config["proximity_distance_m"],
@@ -1578,6 +1662,8 @@ def handle_config_post(environ, start_response):
         antsdr_config["range_rings"]     = bool(body.get("range_rings",    antsdr_config["range_rings"]))
         antsdr_config["range_ring_color"]   = str(body.get("range_ring_color",   antsdr_config["range_ring_color"]))
         antsdr_config["range_ring_opacity"] = max(0.0, min(1.0, float(body.get("range_ring_opacity", antsdr_config["range_ring_opacity"]))))
+        if "range_ring_radii_m" in body:
+            antsdr_config["range_ring_radii_m"] = _sanitize_ring_radii(body.get("range_ring_radii_m"))
         antsdr_config["show_trails"]     = bool(body.get("show_trails",    antsdr_config["show_trails"]))
         antsdr_config["proximity_alerts"]     = bool(body.get("proximity_alerts",     antsdr_config["proximity_alerts"]))
         antsdr_config["proximity_distance_m"] = max(10, int(body.get("proximity_distance_m", antsdr_config["proximity_distance_m"])))
@@ -1901,6 +1987,19 @@ def handle_record_replay_stop(start_response):
     return _json_response(start_response, result, "200 OK" if result.get("ok") else "400 Bad Request")
 
 
+def handle_record_replay_seek(environ, start_response):
+    try:
+        length = int(environ.get("CONTENT_LENGTH", 0) or 0)
+        body = json.loads(environ["wsgi.input"].read(length) or b"{}") if length else {}
+        if not isinstance(body, dict):
+            body = {}
+        target_t = body.get("t", body.get("target", 0))
+    except (ValueError, json.JSONDecodeError, TypeError):
+        return _json_response(start_response, {"ok": False, "error": "bad request"}, "400 Bad Request")
+    result = _replay_seek(target_t)
+    return _json_response(start_response, result, "200 OK" if result.get("ok") else "400 Bad Request")
+
+
 def handle_not_found(start_response):
     start_response("404 Not Found", [("Content-Type", "text/plain")])
     return [b"Not Found"]
@@ -2190,6 +2289,8 @@ def application(environ, start_response):
         return handle_record_replay_start(environ, start_response)
     if path == "/record/replay/stop" and method == "POST":
         return handle_record_replay_stop(start_response)
+    if path == "/record/replay/seek" and method == "POST":
+        return handle_record_replay_seek(environ, start_response)
     if path.startswith("/record/download/") and method == "GET":
         return handle_record_download(path[len("/record/download/"):], start_response)
 

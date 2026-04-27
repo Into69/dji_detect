@@ -956,6 +956,11 @@
             <input id="cfg-ring-opacity" type="range" min="0" max="1" step="0.05" value="0.7" style="flex:1" />
             <span id="cfg-ring-opacity-val" style="font-size:11px;color:#8b949e;min-width:32px;text-align:right">70%</span>
           </div>
+          <div class="cfg-row">
+            <label>Distances</label>
+            <input id="cfg-ring-radii" class="cfg-input" type="text" placeholder="500, 1km, 2km, 5km, 10km" />
+          </div>
+          <div style="font-size:10px;color:#6e7681;margin-top:-4px">Comma-separated. Plain numbers = meters; suffix m or km supported.</div>
         </div>
         <div class="cfg-btn-row">
           <button class="cfg-btn active" id="btn-trails">Trails: ON</button>
@@ -1129,6 +1134,14 @@
           </div>
         </div>
         <div id="rec-replay-status" style="font-size:12px;color:#8b949e;min-height:16px"></div>
+        <div id="rec-replay-bar" style="display:none;flex-direction:column;gap:3px;margin-top:2px">
+          <input type="range" id="rec-replay-slider" min="0" max="1000" value="0" step="1" style="width:100%" />
+          <div style="display:flex;justify-content:space-between;font-size:10px;color:#6e7681">
+            <span id="rec-replay-start-time"></span>
+            <span id="rec-replay-now-time" style="color:#58a6ff;font-weight:600"></span>
+            <span id="rec-replay-end-time"></span>
+          </div>
+        </div>
         <div id="rec-list" style="display:flex;flex-direction:column;gap:6px;margin-top:4px"></div>
       </div>
     </div>
@@ -1285,7 +1298,7 @@ let autoFit    = true;
 let showLines  = true;
 let rangeRings = false;
 let rangeRingLayers = [];   // Leaflet circle layers
-const RANGE_RING_RADII_M = [500, 1000, 2000, 5000, 10000];
+let rangeRingRadiiM = [500, 1000, 2000, 5000, 10000];
 let showTrails = true;
 const TRAIL_MAX_POINTS = 200;
 let proximityEnabled  = false;
@@ -1464,11 +1477,35 @@ function clearRangeRings() {
 let rangeRingColor   = '#3fb950';
 let rangeRingOpacity = 0.7;
 
+function parseRingRadiiInput(s) {
+  const out = [];
+  const seen = new Set();
+  for (const raw of String(s || '').split(/[,;\n]/)) {
+    const tok = raw.trim().toLowerCase();
+    if (!tok) continue;
+    const m = tok.match(/^([\d.]+)\s*(km|m)?$/);
+    if (!m) continue;
+    let n = parseFloat(m[1]);
+    if (!isFinite(n) || n <= 0) continue;
+    if (m[2] === 'km') n *= 1000;
+    n = Math.round(n);
+    if (n < 1 || n > 500000) continue;
+    if (!seen.has(n)) { seen.add(n); out.push(n); }
+  }
+  out.sort((a, b) => a - b);
+  return out.slice(0, 20);
+}
+
+function fmtRingRadiiInput(arr) {
+  return (arr || []).map(m => m >= 1000 && m % 1000 === 0 ? (m/1000) + 'km' : m + 'm').join(', ');
+}
+
 function updateRangeRings() {
   clearRangeRings();
   if (!rangeRings || !sensorMarker) return;
   const center = sensorMarker.getLatLng();
-  for (const r of RANGE_RING_RADII_M) {
+  const cosLat = Math.max(0.01, Math.cos(center.lat * Math.PI / 180));
+  rangeRingRadiiM.forEach((r, idx) => {
     const circle = L.circle(center, {
       radius: r,
       color: rangeRingColor,
@@ -1477,25 +1514,32 @@ function updateRangeRings() {
       fill: false,
       interactive: false,
     }).addTo(map);
-    const label = L.marker(
-      [center.lat, center.lng],
-      {
-        icon: L.divIcon({
-          className: 'range-ring-label',
-          html: `<span>${fmtRingLabel(r)}</span>`,
-          iconSize: [40, 14],
-          iconAnchor: [20, 7],
-        }),
-        interactive: false,
-        keyboard: false,
-      }
-    );
-    // Place label on the north edge of the ring
-    const northLat = center.lat + (r / 111320);
-    label.setLatLng([northLat, center.lng]);
-    label.addTo(map);
-    rangeRingLayers.push(circle, label);
-  }
+    const dLat = r / 111320;
+    const dLon = r / (111320 * cosLat);
+    const offsets = [
+      [ dLat, 0], [-dLat, 0],   // N, S — always
+    ];
+    if (idx > 0) {
+      offsets.push([0,  dLon], [0, -dLon]);  // E, W — skip the innermost ring
+    }
+    for (const [oLat, oLon] of offsets) {
+      const label = L.marker(
+        [center.lat + oLat, center.lng + oLon],
+        {
+          icon: L.divIcon({
+            className: 'range-ring-label',
+            html: `<span>${fmtRingLabel(r)}</span>`,
+            iconSize: [40, 14],
+            iconAnchor: [20, 7],
+          }),
+          interactive: false,
+          keyboard: false,
+        }
+      ).addTo(map);
+      rangeRingLayers.push(label);
+    }
+    rangeRingLayers.push(circle);
+  });
 }
 
 // ── Geo helpers ────────────────────────────────────────────────────────────
@@ -2216,6 +2260,10 @@ function loadConfig() {
         document.getElementById('cfg-ring-opacity').value = rangeRingOpacity;
         document.getElementById('cfg-ring-opacity-val').textContent = Math.round(rangeRingOpacity * 100) + '%';
       }
+      if (Array.isArray(cfg.range_ring_radii_m) && cfg.range_ring_radii_m.length) {
+        rangeRingRadiiM = cfg.range_ring_radii_m.slice().sort((a, b) => a - b);
+      }
+      document.getElementById('cfg-ring-radii').value = fmtRingRadiiInput(rangeRingRadiiM);
       document.getElementById('cfg-rings-controls').style.display = rangeRings ? '' : 'none';
       showTrails = cfg.show_trails !== undefined ? !!cfg.show_trails : true;
       proximityEnabled  = !!cfg.proximity_alerts;
@@ -2321,6 +2369,7 @@ function postConfig(reconnect) {
     range_rings:      rangeRings,
     range_ring_color:   rangeRingColor,
     range_ring_opacity: rangeRingOpacity,
+    range_ring_radii_m: rangeRingRadiiM,
     show_trails:      showTrails,
     proximity_alerts:     document.getElementById('cfg-proximity-enabled').checked,
     proximity_distance_m: parseInt(document.getElementById('cfg-proximity-distance').value, 10) || 1000,
@@ -2475,6 +2524,18 @@ document.getElementById('cfg-ring-color').addEventListener('input', function () 
 document.getElementById('cfg-ring-opacity').addEventListener('input', function () {
   rangeRingOpacity = parseFloat(this.value);
   document.getElementById('cfg-ring-opacity-val').textContent = Math.round(rangeRingOpacity * 100) + '%';
+  if (rangeRings) updateRangeRings();
+});
+
+document.getElementById('cfg-ring-radii').addEventListener('change', function () {
+  const parsed = parseRingRadiiInput(this.value);
+  if (!parsed.length) {
+    showToast('Need at least one valid distance.', 'err');
+    this.value = fmtRingRadiiInput(rangeRingRadiiM);
+    return;
+  }
+  rangeRingRadiiM = parsed;
+  this.value = fmtRingRadiiInput(rangeRingRadiiM);
   if (rangeRings) updateRangeRings();
 });
 
@@ -2727,6 +2788,11 @@ const recNameInput   = document.getElementById('rec-name');
 const recSpeedInput  = document.getElementById('rec-speed');
 const recStatusEl    = document.getElementById('rec-status');
 const recReplayEl    = document.getElementById('rec-replay-status');
+const recReplayBar     = document.getElementById('rec-replay-bar');
+const recReplaySlider  = document.getElementById('rec-replay-slider');
+const recReplayStartT  = document.getElementById('rec-replay-start-time');
+const recReplayEndT    = document.getElementById('rec-replay-end-time');
+const recReplayNowT    = document.getElementById('rec-replay-now-time');
 const recListEl      = document.getElementById('rec-list');
 const recToggleBtn   = document.getElementById('btn-record-toggle');
 const recUploadBtn   = document.getElementById('btn-record-upload');
@@ -2812,26 +2878,69 @@ function renderRecordingsList(files) {
 }
 
 let _replayLast = { active: false };
+let _replayScrubbing = false;
 function fmtRecTime(ts) {
   if (!ts) return '';
   return new Date(ts * 1000).toLocaleString();
+}
+function fmtRecTimeShort(ts) {
+  if (!ts) return '';
+  return new Date(ts * 1000).toLocaleTimeString();
 }
 
 function updateReplayStatus(s) {
   _replayLast = s || { active: false };
   if (s && s.active) {
     const pct = s.total ? Math.floor((s.sent / s.total) * 100) : 0;
-    let line = `Replaying ${s.file} @ ${s.speed}× — ${s.sent}/${s.total || '?'} (${pct}%)`;
-    if (s.recorded_now) line += `<br><span style="color:#8b949e">Recorded: ${escHtml(fmtRecTime(s.recorded_now))}</span>`;
-    else if (s.recorded_start) line += `<br><span style="color:#8b949e">Recorded: ${escHtml(fmtRecTime(s.recorded_start))}</span>`;
-    recReplayEl.innerHTML = line;
+    recReplayEl.innerHTML = `Replaying ${escHtml(s.file)} @ ${s.speed}× — ${s.sent}/${s.total || '?'} (${pct}%)`;
     recReplayEl.style.color = '#58a6ff';
+
+    if (s.recorded_start && s.recorded_end && s.recorded_end > s.recorded_start) {
+      recReplayBar.style.display = 'flex';
+      recReplayStartT.textContent = fmtRecTimeShort(s.recorded_start);
+      recReplayEndT.textContent   = fmtRecTimeShort(s.recorded_end);
+      recReplayNowT.textContent   = fmtRecTimeShort(s.recorded_now || s.recorded_start);
+      if (!_replayScrubbing) {
+        const span = s.recorded_end - s.recorded_start;
+        const frac = span > 0 ? Math.max(0, Math.min(1, (s.recorded_now - s.recorded_start) / span)) : 0;
+        recReplaySlider.value = String(Math.round(frac * 1000));
+      }
+    } else {
+      recReplayBar.style.display = 'none';
+    }
   } else {
     recReplayEl.textContent = '';
+    recReplayBar.style.display = 'none';
+    _replayScrubbing = false;
   }
   // Re-render list so play/stop buttons reflect current state.
   fetch('/record/list').then(r => r.json()).then(d => renderRecordingsList(d.files || [])).catch(() => {});
 }
+
+recReplaySlider.addEventListener('mousedown',  () => { _replayScrubbing = true; });
+recReplaySlider.addEventListener('touchstart', () => { _replayScrubbing = true; });
+recReplaySlider.addEventListener('input', () => {
+  if (!_replayLast || !_replayLast.recorded_start || !_replayLast.recorded_end) return;
+  const span = _replayLast.recorded_end - _replayLast.recorded_start;
+  const frac = parseFloat(recReplaySlider.value) / 1000;
+  recReplayNowT.textContent = fmtRecTimeShort(_replayLast.recorded_start + frac * span);
+});
+recReplaySlider.addEventListener('change', () => {
+  if (!_replayLast || !_replayLast.recorded_start || !_replayLast.recorded_end) {
+    _replayScrubbing = false;
+    return;
+  }
+  const span = _replayLast.recorded_end - _replayLast.recorded_start;
+  const frac = parseFloat(recReplaySlider.value) / 1000;
+  const target = _replayLast.recorded_start + frac * span;
+  fetch('/record/replay/seek', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ t: target }),
+  })
+    .then(r => r.json()).then(() => { _replayScrubbing = false; })
+    .catch(() => { _replayScrubbing = false; });
+});
 
 recToggleBtn.addEventListener('click', () => {
   if (_recState.active) {
