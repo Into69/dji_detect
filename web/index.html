@@ -819,6 +819,7 @@
           <span class="gpsd-key">Bytes RX</span>    <span class="gpsd-val" id="ser-st-bytes">—</span>
           <span class="gpsd-key">Lines RX</span>    <span class="gpsd-val" id="ser-st-lines">—</span>
           <span class="gpsd-key">Last data</span>   <span class="gpsd-val" id="ser-st-lastrx">—</span>
+          <span class="gpsd-key">Time since</span>  <span class="gpsd-val" id="ser-st-since">—</span>
           <span class="gpsd-key">Uptime</span>      <span class="gpsd-val" id="ser-st-uptime">—</span>
           <span class="gpsd-key">Last error</span>  <span class="gpsd-val" id="ser-st-error">—</span>
         </div>
@@ -1430,6 +1431,8 @@ function renderSidebar() {
         <span class="stat-value">${rangeStr}</span>
         <span class="stat-label">Bearing</span>
         <span class="stat-value">${bearingStr}</span>
+        <span class="stat-label">Seen</span>
+        <span class="stat-value stat-since" data-ts="${d.last_seen || ''}">${fmtSinceShort(d.last_seen)}</span>
       </div>
       <div class="rssi-bar"><div class="rssi-fill" style="width:${pct}%"></div></div>`;
     card.addEventListener('click', () => {
@@ -1572,6 +1575,23 @@ function fmtDistance(m) {
   if (m == null) return '—';
   return m >= 1000 ? (m/1000).toFixed(2) + ' km' : Math.round(m) + ' m';
 }
+
+function fmtSinceShort(ts) {
+  if (!ts) return '—';
+  const sec = Math.max(0, Math.floor(Date.now() / 1000 - ts));
+  if (sec < 60)    return sec + 's ago';
+  if (sec < 3600)  return Math.floor(sec/60) + 'm ' + (sec%60) + 's ago';
+  if (sec < 86400) return Math.floor(sec/3600) + 'h ' + Math.floor((sec%3600)/60) + 'm ago';
+  return Math.floor(sec/86400) + 'd ago';
+}
+
+function updateSinceTimers() {
+  document.querySelectorAll('.stat-since').forEach(el => {
+    const ts = parseFloat(el.dataset.ts);
+    if (isFinite(ts) && ts > 0) el.textContent = fmtSinceShort(ts);
+  });
+}
+setInterval(updateSinceTimers, 1000);
 
 function sensorRelative(lat, lon) {
   if (!sensorMarker) return null;
@@ -2176,16 +2196,20 @@ function updateSerialStatus(stats) {
   document.getElementById('ser-st-bytes').textContent = fmtBytesSize(stats.bytes);
   document.getElementById('ser-st-lines').textContent = stats.lines != null ? stats.lines : '—';
   document.getElementById('ser-st-error').textContent = stats.last_error || '—';
+  document.getElementById('ser-st-lastrx').textContent = _serialLastRx
+    ? new Date(_serialLastRx * 1000).toLocaleTimeString()
+    : '—';
+  refreshSerialSince();
 }
 
-setInterval(() => {
-  if (_serialLastRx) {
-    document.getElementById('ser-st-lastrx').textContent = fmtAge(_serialLastRx);
-  }
+function refreshSerialSince() {
+  document.getElementById('ser-st-since').textContent = _serialLastRx ? fmtAge(_serialLastRx) : '—';
   if (_serialOpenedAt) {
     document.getElementById('ser-st-uptime').textContent = fmtDuration(Date.now()/1000 - _serialOpenedAt);
   }
-}, 1000);
+}
+
+setInterval(refreshSerialSince, 1000);
 
 
 // ── SSE ────────────────────────────────────────────────────────────────────
