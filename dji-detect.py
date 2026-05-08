@@ -1,6 +1,6 @@
 """
 DJI Drone Detection Web App
-Receives drone data from ANTsdr via UDP, displays live positions on a map.
+Receives drone data from ANTsdr over TCP and/or UDP, displays live positions on a map.
 """
 
 VERSION = "0.2.0"
@@ -39,7 +39,7 @@ sensor_position: dict = {}  # lat, lon, alt, mode — current gpsd fix
 antsdr_config: dict = {
     "host":            "0.0.0.0",
     "port":            52002,
-    "connection_type": "udp",       # "udp" or "serial"
+    "connection_type": "network",   # "network" (TCP+UDP listener) or "serial"
     "serial_port":     "/dev/ttyUSB0",
     "serial_baud":     115200,
     "map_style":       "osm",
@@ -89,7 +89,7 @@ serial_stats: dict = {
     "opened_at":    0.0,      # wall time port was opened
     "last_error":   "",
 }
-raw_lines: collections.deque = collections.deque(maxlen=200)  # recent raw lines (UDP or serial)
+raw_lines: collections.deque = collections.deque(maxlen=200)  # recent raw lines (network or serial)
 drone_history: dict = {}              # serial_number -> last known drone dict
 data_lock = threading.Lock()
 sse_queues: list = []
@@ -236,9 +236,9 @@ def load_config():
             antsdr_config["geofence_zones"] = _sanitize_zones(saved["geofence_zones"])
         if isinstance(saved.get("range_ring_radii_m"), list):
             antsdr_config["range_ring_radii_m"] = _sanitize_ring_radii(saved["range_ring_radii_m"])
-        # Migrate legacy "tcp" connection_type to "udp" (TCP listener was replaced).
-        if antsdr_config.get("connection_type") == "tcp":
-            antsdr_config["connection_type"] = "udp"
+        # Migrate legacy connection_type values to the unified "network" listener.
+        if antsdr_config.get("connection_type") in ("tcp", "udp"):
+            antsdr_config["connection_type"] = "network"
         print(f"[Config] Loaded from {CONFIG_FILE}")
     except Exception as e:
         print(f"[Config] Failed to load {CONFIG_FILE}: {e}")
@@ -368,7 +368,7 @@ def broadcast_error(source: str, message: str):
         _io_executor.submit(_send_discord_error, source, message)
 
 
-# --- ANTsdr UDP receiver ---
+# --- ANTsdr network receiver (TCP + UDP) ---
 
 def _parse_antsdr_line(line: str) -> dict | None:
     """
@@ -1287,6 +1287,34 @@ def _process_line(line: str):
     broadcast({"type": "update", "drone": data})
 
 
+# --- shared connection-state tracking for the dual TCP+UDP listener ---
+_antsdr_last_rx: float = 0.0
+_tcp_clients_active: int = 0
+_tcp_clients_lock = threading.Lock()
+SILENCE_TIMEOUT = 30.0
+
+
+def _antsdr_mark_rx():
+    """Called by either listener whenever a record line is received."""
+    global _antsdr_last_rx
+    _antsdr_last_rx = time.time()
+    if not antsdr_connected:
+        _set_antsdr_connected(True)
+
+
+def _antsdr_check_silence():
+    """If both listeners are quiet, flip connected off."""
+    if not antsdr_connected:
+        return
+    with _tcp_clients_lock:
+        tcp_active = _tcp_clients_active
+    if tcp_active > 0:
+        return
+    if _antsdr_last_rx and (time.time() - _antsdr_last_rx) > SILENCE_TIMEOUT:
+        print(f"[ANTsdr] No data for {int(SILENCE_TIMEOUT)}s — marking disconnected")
+        _set_antsdr_connected(False)
+
+
 def _udp_server_loop():
     """Bind UDP socket and process incoming ANTsdr datagrams as newline-delimited records.
 
@@ -1304,38 +1332,29 @@ def _udp_server_loop():
 
         bufs: dict = {}                # per-source partial-line buffer
         seen_sources: set = set()      # sources we've already logged
-        last_rx = 0.0
-        # UDP has no disconnect signal — flip "connected" off if we go silent for this long.
-        SILENCE_TIMEOUT = 30.0
 
         while not antsdr_reconnect.is_set():
             try:
                 data, addr = srv.recvfrom(65536)
             except socket.timeout:
-                if antsdr_connected and last_rx and (time.time() - last_rx) > SILENCE_TIMEOUT:
-                    print(f"[ANTsdr] No UDP data for {int(SILENCE_TIMEOUT)}s — marking disconnected")
-                    _set_antsdr_connected(False)
+                _antsdr_check_silence()
                 continue
             if not data:
                 continue
 
-            last_rx = time.time()
             if addr not in seen_sources:
                 seen_sources.add(addr)
-                print(f"[ANTsdr] Datagrams from {addr[0]}:{addr[1]}")
-            if not antsdr_connected:
-                _set_antsdr_connected(True)
+                print(f"[ANTsdr] UDP datagrams from {addr[0]}:{addr[1]}")
 
             text = data.decode("utf-8", errors="replace")
             buf = bufs.get(addr, "") + text
             while "\n" in buf:
                 line, buf = buf.split("\n", 1)
                 line = line.strip()
-                # Skip empty lines and firmware status markers (e.g. "=")
                 if not line or line == "=":
                     continue
-                # Only forward dji_O,... records; ignore ppm/heartbeat/debug noise.
                 if line.startswith("dji_O,"):
+                    _antsdr_mark_rx()
                     _process_line(line + "\n")
             bufs[addr] = buf
     finally:
@@ -1343,7 +1362,94 @@ def _udp_server_loop():
             srv.close()
         except Exception:
             pass
-        _set_antsdr_connected(False)
+
+
+def _tcp_handle_conn(conn: "socket.socket", addr):
+    """Read newline-framed records from one ANTsdr TCP client until it closes or we reconnect."""
+    global _tcp_clients_active
+    print(f"[ANTsdr] TCP connection from {addr[0]}:{addr[1]}")
+    with _tcp_clients_lock:
+        _tcp_clients_active += 1
+    if not antsdr_connected:
+        _set_antsdr_connected(True)
+
+    conn.settimeout(90)  # firmware heartbeats every 30s; 90s = 3 missed
+    try:
+        conn.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+    except OSError:
+        pass
+
+    buf = ""
+    try:
+        while not antsdr_reconnect.is_set():
+            chunk = conn.recv(4096)
+            if not chunk:
+                print(f"[ANTsdr] TCP closed by {addr[0]}:{addr[1]}")
+                break
+            buf += chunk.decode("utf-8", errors="replace")
+            while "\n" in buf:
+                line, buf = buf.split("\n", 1)
+                line = line.strip()
+                if not line or line == "=":
+                    continue
+                if line.startswith("dji_O,"):
+                    _antsdr_mark_rx()
+                    _process_line(line + "\n")
+    except socket.timeout:
+        print(f"[ANTsdr] TCP {addr[0]}:{addr[1]} timed out")
+    except (ConnectionResetError, BrokenPipeError, OSError) as e:
+        print(f"[ANTsdr] TCP {addr[0]}:{addr[1]} error: {e}")
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+        with _tcp_clients_lock:
+            _tcp_clients_active -= 1
+        _antsdr_check_silence()
+
+
+def _tcp_server_loop():
+    """Accept TCP connections from new-firmware ANTsdr clients; each handled in its own thread."""
+    host = antsdr_config["host"]
+    port = antsdr_config["port"]
+    print(f"[ANTsdr] TCP listening on {host}:{port}")
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        srv.bind((host, port))
+        srv.listen(5)
+        srv.settimeout(1)
+        while not antsdr_reconnect.is_set():
+            try:
+                conn, addr = srv.accept()
+            except socket.timeout:
+                continue
+            threading.Thread(
+                target=_tcp_handle_conn,
+                args=(conn, addr),
+                daemon=True,
+                name=f"antsdr-tcp-{addr[0]}:{addr[1]}",
+            ).start()
+    finally:
+        try:
+            srv.close()
+        except Exception:
+            pass
+
+
+def _network_listen_loop():
+    """Run TCP and UDP listeners simultaneously on the configured port."""
+    tcp_t = threading.Thread(target=_tcp_server_loop, daemon=True, name="antsdr-tcp")
+    udp_t = threading.Thread(target=_udp_server_loop, daemon=True, name="antsdr-udp")
+    tcp_t.start()
+    udp_t.start()
+    # Block until reconnect is signalled — the listener threads watch the same flag and exit.
+    while not antsdr_reconnect.is_set():
+        time.sleep(0.5)
+    tcp_t.join(timeout=2)
+    udp_t.join(timeout=2)
+    _set_antsdr_connected(False)
 
 
 def _kill_port_holders(port: str):
@@ -1416,14 +1522,14 @@ def _serial_loop():
 
 
 def antsdr_receiver():
-    """Dispatch to UDP or serial mode; reconnect on error or reconnect event."""
+    """Dispatch to network (TCP+UDP) or serial mode; reconnect on error or reconnect event."""
     while True:
         antsdr_reconnect.clear()
         try:
             if antsdr_config["connection_type"] == "serial":
                 _serial_loop()
             else:
-                _udp_server_loop()
+                _network_listen_loop()
         except Exception as e:
             _set_antsdr_connected(False)
             print(f"[ANTsdr] Error: {e} — retrying in 5s")
@@ -1655,11 +1761,14 @@ def handle_config_post(environ, start_response):
     try:
         length  = int(environ.get("CONTENT_LENGTH", 0))
         body    = json.loads(environ["wsgi.input"].read(length))
-        conn_type = str(body.get("connection_type", "udp")).strip()
-        if conn_type not in ("udp", "serial"):
-            raise ValueError("connection_type must be 'udp' or 'serial'")
+        conn_type = str(body.get("connection_type", "network")).strip()
+        # Accept legacy "tcp"/"udp" too — they all map to the unified network listener.
+        if conn_type in ("tcp", "udp"):
+            conn_type = "network"
+        if conn_type not in ("network", "serial"):
+            raise ValueError("connection_type must be 'network' or 'serial'")
 
-        if conn_type == "udp":
+        if conn_type == "network":
             host = str(body["antsdr_host"]).strip()
             port = int(body["antsdr_port"])
             if not host or not (1 <= port <= 65535):
@@ -2340,9 +2449,9 @@ def application(environ, start_response):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="DJI Drone Detection Map Server")
     parser.add_argument("--antsdr-host", default="0.0.0.0",
-                        help="ANTsdr UDP bind address (default: 0.0.0.0)")
+                        help="ANTsdr TCP+UDP bind address (default: 0.0.0.0)")
     parser.add_argument("--antsdr-port", type=int, default=52002,
-                        help="ANTsdr UDP listen port (default: 52002)")
+                        help="ANTsdr TCP+UDP listen port (default: 52002)")
     parser.add_argument("--host", default="0.0.0.0",
                         help="Web server bind host (default: 0.0.0.0)")
     parser.add_argument("--port", type=int, default=5001,

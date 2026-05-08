@@ -1,6 +1,6 @@
 # DJI Drone Detector
 
-A web-based DJI drone detection and tracking application. Receives drone telemetry from an [ANTsdr](https://www.crowdsupply.com/microphase/antsdr-e200) device over UDP, displays live positions on an interactive map, and sends alerts to Discord and/or a TAK server.
+A web-based DJI drone detection and tracking application. Receives drone telemetry from an [ANTsdr](https://www.crowdsupply.com/microphase/antsdr-e200) device over TCP and/or UDP, displays live positions on an interactive map, and sends alerts to Discord and/or a TAK server.
 
 ![Version](https://img.shields.io/badge/version-0.1.4-blue)
 
@@ -18,7 +18,7 @@ A web-based DJI drone detection and tracking application. Receives drone telemet
 ## Requirements
 
 - Python 3.9+
-- ANTsdr device running DJI drone detection firmware (UDP output mode)
+- ANTsdr device running DJI drone detection firmware (TCP or UDP output mode — both supported)
 - Optional: gpsd for live sensor GPS position
 
 ```
@@ -34,7 +34,7 @@ pip install -r requirements.txt
 
 2. Open `http://<host>:5001` in a browser.
 
-The ANTsdr device should be configured to send UDP datagrams to this machine on the port specified in `dd-config.json` (default `52002`).
+The ANTsdr device should be configured to connect (TCP) or send datagrams (UDP) to this machine on the port specified in `dd-config.json` (default `52002`). Both protocols are listened to simultaneously.
 
 ## Configuration
 
@@ -42,9 +42,9 @@ All settings are saved to `dd-config.json` and can also be changed live from the
 
 | Field | Default | Description |
 |---|---|---|
-| `antsdr_host` | `0.0.0.0` | Interface to bind for ANTsdr UDP datagrams |
-| `antsdr_port` | `52002` | UDP port the ANTsdr device sends to |
-| `connection_type` | `udp` | `udp` or `serial` |
+| `antsdr_host` | `0.0.0.0` | Interface to bind for ANTsdr TCP+UDP listener |
+| `antsdr_port` | `52002` | Port to listen on (TCP and UDP, simultaneously) |
+| `connection_type` | `network` | `network` (TCP+UDP listener) or `serial` |
 | `serial_port` | `/dev/ttyUSB0` | Serial device path (serial mode only) |
 | `serial_baud` | `115200` | Serial baud rate |
 | `map_style` | `osm` | Map tile style |

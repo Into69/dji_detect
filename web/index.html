@@ -777,7 +777,7 @@
         <div class="cfg-row">
           <label>Type</label>
           <select id="cfg-conn-type" class="cfg-select">
-            <option value="udp">UDP (listen)</option>
+            <option value="network">Network (TCP + UDP listen)</option>
             <option value="serial">Serial</option>
           </select>
         </div>
@@ -2249,14 +2249,14 @@ function loadConfig() {
     .then(cfg => {
       document.getElementById('cfg-antsdr-host').value     = cfg.antsdr_host  || '';
       document.getElementById('cfg-antsdr-port').value     = cfg.antsdr_port  || '';
-      document.getElementById('cfg-conn-type').value       = cfg.connection_type || 'udp';
+      document.getElementById('cfg-conn-type').value       = cfg.connection_type || 'network';
       document.getElementById('cfg-serial-baud').value     = cfg.serial_baud  || '';
       document.getElementById('cfg-discord-webhook').value = cfg.discord_webhook || '';
       document.getElementById('cfg-tak-enabled').checked   = !!cfg.tak_enabled;
       document.getElementById('cfg-tak-protocol').value    = cfg.tak_protocol || 'udp';
       document.getElementById('cfg-tak-host').value        = cfg.tak_host || '';
       document.getElementById('cfg-tak-port').value        = cfg.tak_port || '';
-      toggleConnType(cfg.connection_type || 'udp', cfg.serial_port || '');
+      toggleConnType(cfg.connection_type || 'network', cfg.serial_port || '');
 
       if (cfg.version)     document.getElementById('app-version').textContent = 'v' + cfg.version;
       if (cfg.map_style)   setMapStyle(cfg.map_style);
@@ -2367,7 +2367,7 @@ function loadSerialPorts(selectPort) {
 }
 
 function toggleConnType(type, selectPort) {
-  document.getElementById('cfg-udp-rows').style.display    = type === 'udp'    ? '' : 'none';
+  document.getElementById('cfg-udp-rows').style.display    = type === 'network' ? '' : 'none';
   document.getElementById('cfg-serial-rows').style.display = type === 'serial' ? '' : 'none';
   document.getElementById('cfg-serial-status-section').style.display = type === 'serial' ? '' : 'none';
   if (type === 'serial') loadSerialPorts(selectPort || document.getElementById('cfg-serial-port').value);
@@ -2419,7 +2419,7 @@ function postConfig(reconnect) {
     reconnect,
   };
 
-  if (connType === 'udp') {
+  if (connType === 'network') {
     const host = document.getElementById('cfg-antsdr-host').value.trim();
     const port = parseInt(document.getElementById('cfg-antsdr-port').value, 10);
     if (!host || !port || port < 1 || port > 65535) {
@@ -2449,7 +2449,7 @@ function postConfig(reconnect) {
     if (!r.ok) { showToast('Save error: ' + (r.error || 'unknown'), 'err'); return; }
     const label = connType === 'serial'
       ? `Serial ${payload.serial_port}`
-      : `UDP ${payload.antsdr_host}:${payload.antsdr_port}`;
+      : `Network ${payload.antsdr_host}:${payload.antsdr_port} (TCP+UDP)`;
     showToast(reconnect ? `Connecting via ${label}` : 'Settings saved.', 'ok');
   })
   .catch(() => { status.textContent = ''; showToast('Request failed.', 'err'); });
