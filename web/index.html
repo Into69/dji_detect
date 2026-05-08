@@ -1251,11 +1251,12 @@ let currentTileLayer = L.tileLayer(MAP_STYLES.osm.url, MAP_STYLES.osm).addTo(map
 function setMapStyle(key) {
   const s = MAP_STYLES[key];
   if (!s) return;
-  map.removeLayer(currentTileLayer);
+  document.getElementById('cfg-map-style').value = key;
+  if (key === currentStyleKey && currentTileLayer) return;  // already active — skip teardown to avoid flicker
+  if (currentTileLayer) map.removeLayer(currentTileLayer);
   currentTileLayer = L.tileLayer(s.url, s).addTo(map);
   currentTileLayer.bringToBack();
   currentStyleKey = key;
-  document.getElementById('cfg-map-style').value = key;
 }
 
 
