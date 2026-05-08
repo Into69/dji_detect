@@ -1353,6 +1353,7 @@ def _udp_server_loop():
                 line = line.strip()
                 if not line or line == "=":
                     continue
+                print(f"[ANTsdr UDP {addr[0]}:{addr[1]}] {line}")
                 if line.startswith("dji_O,"):
                     _antsdr_mark_rx()
                     _process_line(line + "\n")
@@ -1392,6 +1393,7 @@ def _tcp_handle_conn(conn: "socket.socket", addr):
                 line = line.strip()
                 if not line or line == "=":
                     continue
+                print(f"[ANTsdr TCP {addr[0]}:{addr[1]}] {line}")
                 if line.startswith("dji_O,"):
                     _antsdr_mark_rx()
                     _process_line(line + "\n")
