@@ -1288,7 +1288,11 @@ def _process_line(line: str):
 
 
 def _udp_server_loop():
-    """Bind UDP socket and process incoming ANTsdr datagrams as newline-delimited records."""
+    """Bind UDP socket and process incoming ANTsdr datagrams as newline-delimited records.
+
+    The DragonScope tcp→udp bridge can split a single firmware line across two datagrams,
+    so we keep a per-source buffer keyed by sender (host, port) and only emit on '\n'.
+    """
     host = antsdr_config["host"]
     port = antsdr_config["port"]
     print(f"[ANTsdr] UDP listening on {host}:{port}")
@@ -1298,7 +1302,8 @@ def _udp_server_loop():
         srv.bind((host, port))
         srv.settimeout(1)
 
-        last_addr = None
+        bufs: dict = {}                # per-source partial-line buffer
+        seen_sources: set = set()      # sources we've already logged
         last_rx = 0.0
         # UDP has no disconnect signal — flip "connected" off if we go silent for this long.
         SILENCE_TIMEOUT = 30.0
@@ -1311,18 +1316,28 @@ def _udp_server_loop():
                     print(f"[ANTsdr] No UDP data for {int(SILENCE_TIMEOUT)}s — marking disconnected")
                     _set_antsdr_connected(False)
                 continue
+            if not data:
+                continue
 
             last_rx = time.time()
-            if addr != last_addr:
-                last_addr = addr
+            if addr not in seen_sources:
+                seen_sources.add(addr)
                 print(f"[ANTsdr] Datagrams from {addr[0]}:{addr[1]}")
             if not antsdr_connected:
                 _set_antsdr_connected(True)
 
             text = data.decode("utf-8", errors="replace")
-            for line in text.splitlines():
-                if line.strip():
+            buf = bufs.get(addr, "") + text
+            while "\n" in buf:
+                line, buf = buf.split("\n", 1)
+                line = line.strip()
+                # Skip empty lines and firmware status markers (e.g. "=")
+                if not line or line == "=":
+                    continue
+                # Only forward dji_O,... records; ignore ppm/heartbeat/debug noise.
+                if line.startswith("dji_O,"):
                     _process_line(line + "\n")
+            bufs[addr] = buf
     finally:
         try:
             srv.close()
