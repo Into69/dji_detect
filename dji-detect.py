@@ -38,7 +38,8 @@ drone_data: dict = {}       # serial_number -> latest drone dict
 sensor_position: dict = {}  # lat, lon, alt, mode — current gpsd fix
 antsdr_config: dict = {
     "host":            "0.0.0.0",
-    "port":            52002,
+    "port":            52002,        # UDP listen port (DragonScope-bridged firmware)
+    "tcp_port":        41030,        # TCP listen port (firmware that connects directly)
     "connection_type": "network",   # "network" (TCP+UDP listener) or "serial"
     "serial_port":     "/dev/ttyUSB0",
     "serial_baud":     115200,
@@ -197,6 +198,7 @@ def load_config():
         mapping = {
             "antsdr_host":      ("host",             str),
             "antsdr_port":      ("port",             int),
+            "antsdr_tcp_port":  ("tcp_port",         int),
             "connection_type":  ("connection_type",  str),
             "serial_port":      ("serial_port",      str),
             "serial_baud":      ("serial_baud",      int),
@@ -249,6 +251,7 @@ def save_config():
     CONFIG_FILE.write_text(json.dumps({
         "antsdr_host":     antsdr_config["host"],
         "antsdr_port":     antsdr_config["port"],
+        "antsdr_tcp_port": antsdr_config["tcp_port"],
         "connection_type": antsdr_config["connection_type"],
         "serial_port":     antsdr_config["serial_port"],
         "serial_baud":     antsdr_config["serial_baud"],
@@ -1414,7 +1417,7 @@ def _tcp_handle_conn(conn: "socket.socket", addr):
 def _tcp_server_loop():
     """Accept TCP connections from new-firmware ANTsdr clients; each handled in its own thread."""
     host = antsdr_config["host"]
-    port = antsdr_config["port"]
+    port = antsdr_config["tcp_port"]
     print(f"[ANTsdr] TCP listening on {host}:{port}")
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -1582,7 +1585,8 @@ def gpsd_poller(host: str, port: int):
             sock.sendall(b'?WATCH={"enable":true,"json":true}\n')
 
             latest_tpv: dict = {}
-            latest_sats: list = []
+            sats_used    = 0
+            sats_visible = 0
 
             while True:
                 line = fh.readline()
@@ -1600,8 +1604,18 @@ def gpsd_poller(host: str, port: int):
                     latest_tpv = msg
                     if msg.get("mode", 0) >= 2:
                         last_fix_wall_time = time.time()
+                    # gpsd 3.21+ may report satellites_used/satellites_visible on TPV directly
+                    t_used = msg.get("satellites_used")
+                    t_vis  = msg.get("satellites_visible")
+                    if isinstance(t_used, int): sats_used = t_used
+                    if isinstance(t_vis,  int): sats_visible = t_vis
                 elif cls == "SKY":
-                    latest_sats = msg.get("satellites", [])
+                    sats_list = msg.get("satellites") or []
+                    # Prefer explicit summary fields (gpsd may omit per-sat entries or trim them)
+                    nsat = msg.get("nSat")
+                    usat = msg.get("uSat")
+                    sats_visible = int(nsat) if isinstance(nsat, int) else len(sats_list)
+                    sats_used    = int(usat) if isinstance(usat, int) else sum(1 for s in sats_list if s.get("used"))
                 else:
                     continue
 
@@ -1615,8 +1629,8 @@ def gpsd_poller(host: str, port: int):
                     "lat":                latest_tpv.get("lat") if has_fix else None,
                     "lon":                latest_tpv.get("lon") if has_fix else None,
                     "alt":                alt_val               if mode >= 3 else None,
-                    "sats_used":          sum(1 for s in latest_sats if s.get("used")),
-                    "sats_visible":       len(latest_sats),
+                    "sats_used":          sats_used,
+                    "sats_visible":       sats_visible,
                     "gps_time":           latest_tpv.get("time"),
                     "last_fix_wall_time": last_fix_wall_time or None,
                 }
@@ -1718,6 +1732,7 @@ def handle_config_get(start_response):
             "version":         VERSION,
             "antsdr_host":     antsdr_config["host"],
             "antsdr_port":     antsdr_config["port"],
+            "antsdr_tcp_port": antsdr_config["tcp_port"],
             "connection_type": antsdr_config["connection_type"],
             "serial_port":     antsdr_config["serial_port"],
             "serial_baud":     antsdr_config["serial_baud"],
@@ -1773,10 +1788,14 @@ def handle_config_post(environ, start_response):
         if conn_type == "network":
             host = str(body["antsdr_host"]).strip()
             port = int(body["antsdr_port"])
-            if not host or not (1 <= port <= 65535):
+            tcp_port = int(body.get("antsdr_tcp_port", antsdr_config["tcp_port"]))
+            if not host or not (1 <= port <= 65535) or not (1 <= tcp_port <= 65535):
                 raise ValueError("invalid host or port")
+            if port == tcp_port:
+                raise ValueError("UDP and TCP ports must differ")
             antsdr_config["host"] = host
             antsdr_config["port"] = port
+            antsdr_config["tcp_port"] = tcp_port
         else:
             sp = str(body.get("serial_port", antsdr_config["serial_port"])).strip()
             sb = int(body.get("serial_baud", antsdr_config["serial_baud"]))
@@ -2453,7 +2472,9 @@ if __name__ == "__main__":
     parser.add_argument("--antsdr-host", default="0.0.0.0",
                         help="ANTsdr TCP+UDP bind address (default: 0.0.0.0)")
     parser.add_argument("--antsdr-port", type=int, default=52002,
-                        help="ANTsdr TCP+UDP listen port (default: 52002)")
+                        help="ANTsdr UDP listen port (default: 52002)")
+    parser.add_argument("--antsdr-tcp-port", type=int, default=41030,
+                        help="ANTsdr TCP listen port (default: 41030)")
     parser.add_argument("--host", default="0.0.0.0",
                         help="Web server bind host (default: 0.0.0.0)")
     parser.add_argument("--port", type=int, default=5001,
@@ -2490,6 +2511,8 @@ if __name__ == "__main__":
         antsdr_config["host"] = args.antsdr_host
     if args.antsdr_port != parser.get_default("antsdr_port"):
         antsdr_config["port"] = args.antsdr_port
+    if args.antsdr_tcp_port != parser.get_default("antsdr_tcp_port"):
+        antsdr_config["tcp_port"] = args.antsdr_tcp_port
 
     threading.Thread(
         target=antsdr_receiver,
