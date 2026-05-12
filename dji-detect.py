@@ -1587,6 +1587,8 @@ def gpsd_poller(host: str, port: int):
             latest_tpv: dict = {}
             sats_used    = 0
             sats_visible = 0
+            _dumped_tpv  = False
+            _dumped_sky  = False
 
             while True:
                 line = fh.readline()
@@ -1607,15 +1609,21 @@ def gpsd_poller(host: str, port: int):
                     # gpsd 3.21+ may report satellites_used/satellites_visible on TPV directly
                     t_used = msg.get("satellites_used")
                     t_vis  = msg.get("satellites_visible")
-                    if isinstance(t_used, int): sats_used = t_used
-                    if isinstance(t_vis,  int): sats_visible = t_vis
+                    if isinstance(t_used, (int, float)): sats_used    = int(t_used)
+                    if isinstance(t_vis,  (int, float)): sats_visible = int(t_vis)
+                    if not _dumped_tpv:
+                        _dumped_tpv = True
+                        print(f"[GPSD] First TPV keys: {sorted(msg.keys())} | sample: {json.dumps(msg)[:300]}")
                 elif cls == "SKY":
                     sats_list = msg.get("satellites") or []
                     # Prefer explicit summary fields (gpsd may omit per-sat entries or trim them)
                     nsat = msg.get("nSat")
                     usat = msg.get("uSat")
-                    sats_visible = int(nsat) if isinstance(nsat, int) else len(sats_list)
-                    sats_used    = int(usat) if isinstance(usat, int) else sum(1 for s in sats_list if s.get("used"))
+                    sats_visible = int(nsat) if isinstance(nsat, (int, float)) else len(sats_list)
+                    sats_used    = int(usat) if isinstance(usat, (int, float)) else sum(1 for s in sats_list if s.get("used"))
+                    if not _dumped_sky:
+                        _dumped_sky = True
+                        print(f"[GPSD] First SKY keys: {sorted(msg.keys())} | nSat={nsat} uSat={usat} sats_list={len(sats_list)} | sample: {json.dumps(msg)[:400]}")
                 else:
                     continue
 
