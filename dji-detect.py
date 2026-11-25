@@ -2576,6 +2576,9 @@ def application(environ, start_response):
             return _json_response(start_response, sdr_manager.devices())
         if path == "/sdr/test" and method == "POST":
             return handle_sdr_test(environ, start_response)
+        if path == "/sdr/selftest" and method == "POST":
+            result = sdr_manager.request_self_test()
+            return _json_response(start_response, result, "200 OK" if result.get("ok") else "400 Bad Request")
         if path == "/sdr/captures" and method == "GET":
             return _json_response(start_response, {"captures": sdr_manager.list_captures()})
         if path == "/sdr/captures/download" and method == "GET":

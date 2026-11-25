@@ -1227,6 +1227,10 @@
       <div class="cfg-section-title">Status</div>
       <div class="cfg-rows">
         <div id="sdr-status" style="font-size:12px;color:#8b949e;line-height:1.5">—</div>
+        <div id="sdr-selftest" style="font-size:12px;color:#8b949e;line-height:1.5"></div>
+        <div class="cfg-btn-row">
+          <button class="cfg-btn" id="sdr-selftest-run">Run self-test</button>
+        </div>
         <div class="cfg-row">
           <label>Test at</label>
           <div class="cfg-input-suffix">
@@ -3286,10 +3290,15 @@ function refreshSdrStatus() {
 
 function renderSdrStatus(st) {
   if (!st) return;
-  const colors = { disabled: '#6e7681', opening: '#d29922', ready: '#3fb950', capturing: '#58a6ff', error: '#f85149' };
+  const colors = { disabled: '#6e7681', opening: '#d29922', testing: '#d29922', ready: '#3fb950', capturing: '#58a6ff', error: '#f85149' };
+  const hints = {
+    opening: 'starting the SDR — a B2xx loads firmware on first start, this can take ~10 s',
+    testing: 'running self-test',
+  };
   const lines = [
     `<span style="color:${colors[st.state] || '#8b949e'};font-weight:600">${escHtml((st.state || '').toUpperCase())}</span>` +
-      (st.device_name ? ` · ${escHtml(st.device_name)}` : ''),
+      (st.device_name ? ` · ${escHtml(st.device_name)}` : '') +
+      (hints[st.state] ? ` · ${hints[st.state]}` : ''),
     `Captures this session: ${st.captures || 0}` + (st.dropped ? ` · dropped while busy: ${st.dropped}` : '') +
       (st.storage_bytes != null ? ` · on disk: ${fmtBytes(st.storage_bytes)}` : ''),
   ];
@@ -3300,7 +3309,31 @@ function renderSdrStatus(st) {
   }
   if (st.last_error) lines.push(`<span style="color:#f85149">${escHtml(st.last_error)}</span>`);
   sdrEl('sdr-status').innerHTML = lines.join('<br>');
+  renderSdrSelfTest(st.self_test);
 }
+
+function renderSdrSelfTest(t) {
+  const el = sdrEl('sdr-selftest');
+  if (!t) { el.innerHTML = ''; return; }
+  const lvl = { ok: ['✓', '#3fb950'], warn: ['!', '#d29922'], fail: ['✗', '#f85149'] };
+  const when = new Date(t.ran_at * 1000).toLocaleTimeString();
+  const head = t.ok
+    ? `<span style="color:#3fb950;font-weight:600">Self-test passed</span>` +
+      (t.warnings ? ` <span style="color:#d29922">(${t.warnings} warning${t.warnings > 1 ? 's' : ''})</span>` : '')
+    : `<span style="color:#f85149;font-weight:600">Self-test failed</span> — retrying every 15 s`;
+  const rows = (t.checks || []).map(c => {
+    const [icon, color] = lvl[c.level] || ['·', '#8b949e'];
+    return `<span style="color:${color};display:inline-block;width:1em">${icon}</span>` +
+      `${escHtml(c.name)}: ${escHtml(c.detail)}`;
+  });
+  el.innerHTML = [`${head} · ${when} · ${t.elapsed_s}s`, ...rows].join('<br>');
+}
+
+sdrEl('sdr-selftest-run').addEventListener('click', () => {
+  fetch('/sdr/selftest', { method: 'POST' }).then(r => r.json()).then(r => {
+    showToast(r.ok ? 'SDR self-test started' : ('Self-test: ' + r.error), r.ok ? 'ok' : 'err');
+  }).catch(() => showToast('Request failed.', 'err'));
+});
 
 function onSdrCapture(c) {
   showToast(`SDR captured ${c.serial} @ ${c.freq_mhz.toFixed(1)} MHz`, 'ok');

@@ -70,6 +70,13 @@ Settings → **SDR** can drive a second, USB SDR (e.g. Ettus B206mini) to record
 - Captures are written to `sdr_captures/` as [SigMF](https://sigmf.org) (`.sigmf-data` = interleaved int16 I/Q, `.sigmf-meta` = JSON with frequency, rate, gain, sensor location and the triggering drone's telemetry).
 - 15.36 Msps of int16 I/Q is ~61 MB/s, more than USB 2.0 carries — plug a B2xx into a **USB 3** port or captures will overflow. For B2xx devices the app opens UHD with `num_recv_frames=512` (~8 MB of buffering) unless the device string sets its own value. To test the USB link outside the app, run UHD's `benchmark_rate --rx_rate 15.36e6 --duration 10`.
 - The capture buffer (`sample rate × duration × 4` bytes) is allocated once and reused while the SDR is enabled; it is freed when the SDR is disabled.
+- **Startup and self-test:** when the SDR is enabled it is opened right away at app start, not on the first detection. A B2xx loads firmware and FPGA on first open, which can take ~10 s. The SDR tab then runs a self-test and shows the result. It checks:
+  - that the device applied the sample rate, gain, bandwidth and antenna
+  - that it tunes and locks at 2.4 and 5.8 GHz
+  - a short warm-up stream, then a 0.5 s stream checked for overflows
+  - that the signal isn't all zeros or clipping
+
+  Warnings (e.g. gain clamped to the device's maximum, overflows, one band out of range) leave capture enabled. A failure closes the device and retries every 15 s. The test re-runs whenever an RF setting changes, or with **Run self-test**. The first detection that arrives while the SDR is still opening or testing is held and recorded as soon as it's ready, not dropped.
 - "Capture now" records a test capture at any frequency without a drone.
 - Replayed recordings never trigger captures.
 
