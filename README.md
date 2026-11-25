@@ -68,6 +68,8 @@ Settings → **SDR** can drive a second, USB SDR (e.g. Ettus B206mini) to record
 - Requires `numpy` plus either the **UHD** python bindings (Ettus) or **SoapySDR** python bindings (other SDRs). `uhd_find_devices` on `PATH` is used for device discovery.
 - On each detection (respecting a per-drone cooldown), the SDR is tuned to the reported frequency and records `duration` seconds at the configured sample rate (default 15.36 Msps, the native DroneID OFDM rate).
 - Captures are written to `sdr_captures/` as [SigMF](https://sigmf.org) (`.sigmf-data` = interleaved int16 I/Q, `.sigmf-meta` = JSON with frequency, rate, gain, sensor location and the triggering drone's telemetry).
+- 15.36 Msps of int16 I/Q is ~61 MB/s, more than USB 2.0 carries — plug a B2xx into a **USB 3** port or captures will overflow. For B2xx devices the app opens UHD with `num_recv_frames=512` (~8 MB of buffering) unless the device string sets its own value. To test the USB link outside the app, run UHD's `benchmark_rate --rx_rate 15.36e6 --duration 10`.
+- The capture buffer (`sample rate × duration × 4` bytes) is allocated once and reused while the SDR is enabled; it is freed when the SDR is disabled.
 - "Capture now" records a test capture at any frequency without a drone.
 - Replayed recordings never trigger captures.
 

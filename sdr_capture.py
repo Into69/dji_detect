@@ -54,6 +54,9 @@ LIMITS = {
 # so 2**27 samples = 512 MiB. duration_s is shortened to fit at high rates.
 MAX_CAPTURE_SAMPLES = 2 ** 27
 
+# USB receive frames requested for B2xx devices (see _uhd_open_args).
+UHD_B200_RECV_FRAMES = 512
+
 FREQ_MIN_MHZ = 50.0
 FREQ_MAX_MHZ = 6000.0
 
@@ -225,9 +228,32 @@ def _find_soapy_devices() -> list:
 
 # ── Device wrappers ──────────────────────────────────────────────────────────
 
+def _uhd_open_args(args: str) -> str:
+    """Add a larger USB receive buffer for B2xx devices unless the user set one.
+
+    UHD's B2xx default (16 frames, ~256 KB) holds only ~4 ms at 15.36 Msps sc16.
+    The capture thread shares the GIL with the web server, so a few ms between
+    recv() calls is enough to overflow; 512 frames (~8 MB) gives >100 ms of slack.
+    """
+    kv = _parse_kv(args)
+    if kv.get("type") == "b200" and "num_recv_frames" not in kv:
+        kv["num_recv_frames"] = str(UHD_B200_RECV_FRAMES)
+        return _kv_to_str(kv)
+    return args
+
+
 class _UhdDevice:
     def __init__(self, args: str):
-        self.usrp = _uhd.usrp.MultiUSRP(args)
+        open_args = _uhd_open_args(args)
+        try:
+            self.usrp = _uhd.usrp.MultiUSRP(open_args)
+        except Exception as e:
+            if open_args == args:
+                raise
+            print(f"[SDR] Open with '{open_args}' failed ({e}); retrying with '{args}'")
+            open_args = args
+            self.usrp = _uhd.usrp.MultiUSRP(args)
+        self.open_args = open_args
         st_args = _uhd.usrp.StreamArgs("sc16", "sc16")
         st_args.channels = [0]
         self.streamer = self.usrp.get_rx_stream(st_args)
@@ -393,6 +419,7 @@ class SdrCaptureManager:
         self._lock = threading.Lock()
         self._dev = None
         self._dev_id = ""
+        self._buf = None                  # reusable int16 I/Q capture buffer (worker thread only)
         self._last_capture: dict = {}     # serial -> wall time
         self._dropped_sns: set = set()     # serials already counted as dropped while busy
         self._state = {
@@ -542,6 +569,25 @@ class SdrCaptureManager:
                 pass
         self._dev = None
         self._dev_id = ""
+        self._buf = None                  # release the capture buffer with the device
+
+    @staticmethod
+    def _capture_samples(cfg: dict) -> int:
+        return min(int(cfg["sample_rate"] * cfg["duration_s"]), MAX_CAPTURE_SAMPLES)
+
+    def _ensure_buffer(self, cfg: dict):
+        """Return an int16 buffer of 2*samples for this config, reusing the last one.
+
+        A new buffer is written once (fill) so the OS maps its pages now, on the
+        idle worker, rather than page-faulting while samples are streaming in.
+        """
+        need = 2 * self._capture_samples(cfg)
+        if self._buf is None or self._buf.size != need:
+            self._buf = None              # free the old one before allocating
+            buf = _np.empty(need, dtype=_np.int16)
+            buf.fill(0)
+            self._buf = buf
+        return self._buf
 
     def _ensure_device(self, cfg: dict) -> bool:
         """Open/close the device to match config. Returns True if ready to capture."""
@@ -575,7 +621,8 @@ class SdrCaptureManager:
                 raise RuntimeError(f"unknown backend '{backend}'")
             self._dev_id = cfg["device"]
             self._dev.configure(cfg)
-            print(f"[SDR] Ready: {self._dev.name} {self._dev.actual()}")
+            opened = getattr(self._dev, "open_args", args)
+            print(f"[SDR] Ready: {self._dev.name} (args '{opened}') {self._dev.actual()}")
             self._set_state(state="ready", device_name=self._dev.name)
             return True
         except Exception as e:
@@ -588,6 +635,7 @@ class SdrCaptureManager:
 
     def _worker(self):
         retry_at = 0.0
+        buf_failed_size = 0               # buffer size whose allocation last failed
         while True:
             cfg = self.config()
             if time.time() >= retry_at:
@@ -601,6 +649,19 @@ class SdrCaptureManager:
                     self._dev.configure(cfg)
                 except Exception as e:
                     self._error("SDR", f"configure failed: {e}")
+                # Allocate/resize the capture buffer here, off the trigger path.
+                need = 2 * self._capture_samples(cfg)
+                if need != buf_failed_size:
+                    try:
+                        self._ensure_buffer(cfg)
+                        buf_failed_size = 0
+                    except MemoryError:
+                        self._buf = None
+                        buf_failed_size = need    # report once per size, not every loop
+                        msg = (f"cannot allocate {need * 2 / 2**20:.0f} MiB capture buffer "
+                               "— lower sample rate or duration")
+                        self._error("SDR", msg)
+                        self._set_state(last_error=msg)
             try:
                 req = self._q.get(timeout=1.0)
             except queue.Empty:
@@ -629,8 +690,8 @@ class SdrCaptureManager:
             return
         drone = req["drone"]
         freq_hz = req["freq_mhz"] * 1e6
-        num = min(int(cfg["sample_rate"] * cfg["duration_s"]), MAX_CAPTURE_SAMPLES)
-        out = _np.empty(2 * num, dtype=_np.int16)
+        num = self._capture_samples(cfg)
+        out = self._ensure_buffer(cfg)    # normally already allocated by the worker loop
 
         self._set_state(state="capturing")
         t0 = time.time()
