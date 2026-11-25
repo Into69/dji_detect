@@ -61,6 +61,16 @@ All settings are saved to `dd-config.json` and can also be changed live from the
 | `tak_host` | *(empty)* | TAK server hostname or IP |
 | `tak_port` | `8087` | TAK server port |
 
+## External SDR IQ Capture (optional)
+
+Settings → **SDR** can drive a second, USB SDR (e.g. Ettus B206mini) to record raw IQ whenever the ANTsdr detects a drone. Disabled by default.
+
+- Requires `numpy` plus either the **UHD** python bindings (Ettus) or **SoapySDR** python bindings (other SDRs). `uhd_find_devices` on `PATH` is used for device discovery.
+- On each detection (respecting a per-drone cooldown), the SDR is tuned to the reported frequency and records `duration` seconds at the configured sample rate (default 15.36 Msps, the native DroneID OFDM rate).
+- Captures are written to `sdr_captures/` as [SigMF](https://sigmf.org) (`.sigmf-data` = interleaved int16 I/Q, `.sigmf-meta` = JSON with frequency, rate, gain, sensor location and the triggering drone's telemetry).
+- "Capture now" records a test capture at any frequency without a drone.
+- Replayed recordings never trigger captures.
+
 ## Project Structure
 
 ```
