@@ -3216,10 +3216,12 @@ function ensureSdrDeviceOption(id) {
 function scanSdrDevices() {
   _sdrDevicesScanned = true;
   const sel = sdrEl('sdr-device');
-  const keep = sel.value || (_sdrConfig && _sdrConfig.device) || '';
   sdrEl('sdr-scan').disabled = true;
   sdrEl('sdr-backends').textContent = 'Scanning for SDRs…';
   fetch('/sdr/devices').then(r => r.json()).then(({devices, backends}) => {
+    // Read the selection now, not at scan start: loadSdrConfig() may have
+    // filled it in while the (slow) scan was running.
+    const keep = sel.value || (_sdrConfig && _sdrConfig.device) || '';
     sel.innerHTML = '<option value="">— none —</option>';
     devices.forEach(d => {
       const o = document.createElement('option');
@@ -3242,8 +3244,12 @@ function scanSdrDevices() {
 function updateSdrSizeHint() {
   const rate = parseFloat(sdrEl('sdr-rate').value) || 0;
   const dur  = parseFloat(sdrEl('sdr-duration').value) || 0;
+  const MAX_SAMPS = 2 ** 27;  // keep in sync with MAX_CAPTURE_SAMPLES in sdr_capture.py
+  const samps = rate * 1e6 * dur;
   sdrEl('sdr-size-hint').textContent = rate && dur
-    ? `≈ ${fmtBytes(rate * 1e6 * dur * 4)} per capture (int16 I/Q)` : '';
+    ? `≈ ${fmtBytes(Math.min(samps, MAX_SAMPS) * 4)} per capture (int16 I/Q)` +
+      (samps > MAX_SAMPS ? ` — duration capped to ${(MAX_SAMPS / (rate * 1e6)).toFixed(2)} s at this rate` : '')
+    : '';
 }
 ['sdr-rate', 'sdr-duration'].forEach(id => sdrEl(id).addEventListener('input', updateSdrSizeHint));
 

@@ -49,6 +49,11 @@ LIMITS = {
     "max_storage_gb": (0.1, 10000.0),
 }
 
+# Upper bound on samples per capture. UHD rejects num_samps above 0x0fffffff in a
+# single stream command, and the capture buffer is held in RAM (4 bytes/sample),
+# so 2**27 samples = 512 MiB. duration_s is shortened to fit at high rates.
+MAX_CAPTURE_SAMPLES = 2 ** 27
+
 FREQ_MIN_MHZ = 50.0
 FREQ_MAX_MHZ = 6000.0
 
@@ -58,18 +63,34 @@ def sanitize_config(raw) -> dict:
     if not isinstance(raw, dict):
         return cfg
     for key, default in DEFAULTS.items():
-        if key not in raw:
+        if key not in raw or raw[key] is None:
             continue
-        try:
-            val = type(default)(raw[key]) if not isinstance(default, bool) else bool(raw[key])
-        except (TypeError, ValueError):
-            continue
+        v = raw[key]
+        if isinstance(default, bool):
+            if isinstance(v, bool):
+                val = v
+            elif isinstance(v, str) and v.strip().lower() in ("true", "1", "yes", "on"):
+                val = True
+            elif isinstance(v, str) and v.strip().lower() in ("false", "0", "no", "off", ""):
+                val = False
+            elif isinstance(v, (int, float)):
+                val = bool(v)
+            else:
+                continue
+        else:
+            try:
+                val = type(default)(v)
+            except (TypeError, ValueError):
+                continue
         if key in LIMITS:
             lo, hi = LIMITS[key]
             val = type(default)(max(lo, min(hi, val)))
         if isinstance(val, str):
             val = val.strip()
         cfg[key] = val
+    max_dur = MAX_CAPTURE_SAMPLES / cfg["sample_rate"]
+    if cfg["duration_s"] > max_dur:
+        cfg["duration_s"] = round(int(max_dur * 1000) / 1000, 3)
     return cfg
 
 
@@ -207,11 +228,12 @@ def _find_soapy_devices() -> list:
 class _UhdDevice:
     def __init__(self, args: str):
         self.usrp = _uhd.usrp.MultiUSRP(args)
-        st_args = _uhd.usrp.StreamArgs("fc32", "sc16")
+        st_args = _uhd.usrp.StreamArgs("sc16", "sc16")
         st_args.channels = [0]
         self.streamer = self.usrp.get_rx_stream(st_args)
         self.max_samps = self.streamer.get_max_num_samps()
-        self.buf = _np.zeros((1, self.max_samps), dtype=_np.complex64)
+        # Scratch buffer for draining; one uint32 per sc16 I/Q sample.
+        self.buf = _np.zeros((1, self.max_samps), dtype=_np.uint32)
         self.name = self.usrp.get_mboard_name()
         self._applied = {}
 
@@ -258,24 +280,25 @@ class _UhdDevice:
         cmd.num_samps = num_samps
         cmd.stream_now = True
         self.streamer.issue_stream_cmd(cmd)
+        # View the int16 I/Q buffer as one uint32 per complex sample so UHD's
+        # sc16 recv writes straight into it -- no per-packet Python conversion.
+        out32 = out[: 2 * num_samps].view(_np.uint32)
+        chunk = max(self.max_samps, 1 << 18)
         got, overflows = 0, 0
         timeout = 1.0
         while got < num_samps:
-            n = self.streamer.recv(self.buf, md, timeout)
-            timeout = 0.2
+            want = min(chunk, num_samps - got)
+            n = self.streamer.recv(out32[got: got + want].reshape(1, want), md, timeout)
+            timeout = 0.5
+            got += n
             err = md.error_code
             if err == _uhd.types.RXMetadataErrorCode.overflow:
                 overflows += 1
+                break        # num_done bursts end on overflow; report a short capture
             elif err == _uhd.types.RXMetadataErrorCode.timeout:
                 break
             elif err != _uhd.types.RXMetadataErrorCode.none:
                 raise RuntimeError(f"UHD recv error: {err}")
-            if n:
-                n = min(n, num_samps - got)
-                iq = self.buf[0, :n].view(_np.float32) * 32767.0
-                _np.clip(iq, -32768, 32767, out=iq)
-                out[2 * got: 2 * (got + n)] = iq.astype(_np.int16)
-                got += n
         # Drain anything left so the next capture starts clean.
         stop = _uhd.types.StreamCMD(_uhd.types.StreamMode.stop_cont)
         self.streamer.issue_stream_cmd(stop)
@@ -371,6 +394,7 @@ class SdrCaptureManager:
         self._dev = None
         self._dev_id = ""
         self._last_capture: dict = {}     # serial -> wall time
+        self._dropped_sns: set = set()     # serials already counted as dropped while busy
         self._state = {
             "state":        "disabled",   # disabled | opening | ready | capturing | error
             "device_name":  "",
@@ -431,7 +455,9 @@ class SdrCaptureManager:
                                     "freq_mhz": freq, "reason": "detection"})
                 self._last_capture[sn] = now
             except queue.Full:
-                self._state["dropped"] += 1
+                if sn not in self._dropped_sns:
+                    self._dropped_sns.add(sn)
+                    self._state["dropped"] += 1
 
     def test_capture(self, freq_mhz: float) -> dict:
         if not (FREQ_MIN_MHZ <= freq_mhz <= FREQ_MAX_MHZ):
@@ -456,9 +482,13 @@ class SdrCaptureManager:
                 m = {}
             g = m.get("global", {})
             cap = (m.get("captures") or [{}])[0]
+            try:
+                size = data.stat().st_size
+            except OSError:
+                size = 0
             items.append({
                 "name":        base,
-                "size":        data.stat().st_size if data.exists() else 0,
+                "size":        size,
                 "sample_rate": g.get("core:sample_rate"),
                 "freq_hz":     cap.get("core:frequency"),
                 "datetime":    cap.get("core:datetime"),
@@ -578,6 +608,8 @@ class SdrCaptureManager:
                     self._wake.clear()
                     retry_at = 0.0
                 continue
+            with self._lock:
+                self._dropped_sns.clear()
             if self._dev is None:
                 continue
             try:
@@ -597,7 +629,7 @@ class SdrCaptureManager:
             return
         drone = req["drone"]
         freq_hz = req["freq_mhz"] * 1e6
-        num = int(cfg["sample_rate"] * cfg["duration_s"])
+        num = min(int(cfg["sample_rate"] * cfg["duration_s"]), MAX_CAPTURE_SAMPLES)
         out = _np.empty(2 * num, dtype=_np.int16)
 
         self._set_state(state="capturing")
@@ -627,6 +659,7 @@ class SdrCaptureManager:
                 "dji_detect:capture": {
                     "requested_samples": num,
                     "captured_samples":  got,
+                    "complete":          got >= num,
                     "overflows":         overflows,
                     "gain_db":           actual["gain"],
                     "antenna":           actual["antenna"],
@@ -656,13 +689,21 @@ class SdrCaptureManager:
             meta["global"]["core:geolocation"] = {"type": "Point", "coordinates": coords}
         (CAPTURES_DIR / f"{base}.sigmf-meta").write_text(json.dumps(meta, indent=2))
 
-        info = {"name": base, "samples": got, "overflows": overflows,
+        short = got < num
+        info = {"name": base, "samples": got, "requested": num, "complete": not short,
+                "overflows": overflows,
                 "freq_mhz": req["freq_mhz"], "serial": sn, "bytes": got * 4,
                 "elapsed_s": round(time.time() - t0, 2)}
         print(f"[SDR] Captured {got} samples @ {req['freq_mhz']:.1f} MHz -> {base} "
               f"({overflows} overflows, {info['elapsed_s']}s)")
         with self._lock:
             self._state["captures"] += 1
-        self._set_state(state="ready", last_capture=info,
-                        last_error=f"{overflows} overflow(s) during last capture" if overflows else "")
+        warn = ""
+        if short:
+            warn = (f"short capture: {got}/{num} samples ({100 * got / max(num, 1):.0f}%)"
+                    + (f", {overflows} overflow(s)" if overflows else ""))
+            self._error("SDR", warn)
+        elif overflows:
+            warn = f"{overflows} overflow(s) during last capture"
+        self._set_state(state="ready", last_capture=info, last_error=warn)
         self._broadcast({"type": "sdr_capture", "capture": info})

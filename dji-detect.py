@@ -1117,7 +1117,7 @@ def _replay_thread(path: Path, speed: float):
                         with data_lock:
                             sensor_position.update(pos)
                         broadcast({"type": "sensor", "position": pos})
-            _process_line(line + "\n")
+            _process_line(line + "\n", replayed=True)
             i += 1
             sent = i
             _replay_state["sent"] = sent
@@ -1184,7 +1184,7 @@ def _replay_seek(target_t: float) -> dict:
     return {"ok": True, **_replay_status()}
 
 
-def _process_line(line: str):
+def _process_line(line: str, replayed: bool = False):
     """Record raw line, update drone_data, and fire Discord/TAK notifications."""
     global _history_last_saved
     now = time.time()
@@ -1298,7 +1298,9 @@ def _process_line(line: str):
     _io_executor.submit(_send_tak, snapshot)
 
     # External SDR IQ capture — live RF only, never for replayed lines.
-    if sdr_manager is not None and not _replay_state.get("active"):
+    # Per-line flag rather than the global replay state: live ANTsdr lines
+    # keep flowing during a replay and should still trigger captures.
+    if sdr_manager is not None and not replayed:
         sdr_manager.on_detection(snapshot, {"lat": s_lat, "lon": s_lon, "alt": s_alt})
 
     broadcast({"type": "update", "drone": data})
