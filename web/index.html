@@ -1180,7 +1180,7 @@
         <div class="cfg-row">
           <label>Bandwidth</label>
           <div class="cfg-input-suffix">
-            <input id="sdr-bw" class="cfg-input" type="number" min="0" max="61.44" step="0.01" placeholder="0 = auto" />
+            <input id="sdr-bw" class="cfg-input" type="number" min="0" max="61.44" step="0.01" placeholder="= sample rate" title="Analog filter bandwidth. Leave empty or 0 to match the sample rate." />
             <span class="cfg-suffix">MHz</span>
           </div>
         </div>
@@ -3193,7 +3193,8 @@ function loadSdrConfig() {
     ensureSdrDeviceOption(config.device);
     sdrEl('sdr-device').value   = config.device || '';
     sdrEl('sdr-rate').value     = +(config.sample_rate / 1e6).toFixed(3);
-    sdrEl('sdr-bw').value       = +(config.bandwidth / 1e6).toFixed(3);
+    // 0 means "match sample rate" — leave the field empty so the placeholder shows.
+    sdrEl('sdr-bw').value       = config.bandwidth ? +(config.bandwidth / 1e6).toFixed(3) : '';
     sdrEl('sdr-gain').value     = config.gain;
     sdrEl('sdr-antenna').value  = config.antenna || '';
     sdrEl('sdr-duration').value = config.duration_s;
