@@ -57,6 +57,17 @@ MAX_CAPTURE_SAMPLES = 2 ** 27
 # USB receive frames requested for B2xx devices (see _uhd_open_args).
 UHD_B200_RECV_FRAMES = 512
 
+# Self-test, run after the device opens and whenever an RF setting changes.
+SELF_TEST_FREQS_MHZ = (2437.0, 5800.0)   # centre of the DroneID 2.4 / 5.8 GHz bands
+SELF_TEST_STREAM_S = 0.5                 # measured stream length (after a short priming stream)
+SELF_TEST_PRIME_S = 0.05                 # first stream after open can hiccup; not measured
+CLIP_LEVEL = 32000                       # |I| or |Q| at/above this counts as clipped (int16)
+
+# States in which detections are accepted. While the device is still opening or
+# self-testing (a B2xx loads firmware + FPGA on first open, which takes seconds),
+# the first detection is held in the queue and recorded as soon as it is ready.
+ACCEPTING_STATES = ("opening", "testing", "ready", "capturing")
+
 FREQ_MIN_MHZ = 50.0
 FREQ_MAX_MHZ = 6000.0
 
@@ -288,13 +299,17 @@ class _UhdDevice:
         }
 
     def tune(self, freq_hz: float) -> float:
+        """Tune and wait (≤0.5 s) for LO lock. Sets self.last_lock: True/False, or None if unknown."""
         self.usrp.set_rx_freq(_uhd.types.TuneRequest(freq_hz), 0)
+        self.last_lock = False
         deadline = time.time() + 0.5
         while time.time() < deadline:
             try:
                 if self.usrp.get_rx_sensor("lo_locked", 0).to_bool():
+                    self.last_lock = True
                     break
             except Exception:
+                self.last_lock = None        # device has no lo_locked sensor
                 break
             time.sleep(0.005)
         return self.usrp.get_rx_freq(0)
@@ -376,6 +391,7 @@ class _SoapyDevice:
     def tune(self, freq_hz: float) -> float:
         self.dev.setFrequency(self.RX, 0, freq_hz)
         time.sleep(0.01)
+        self.last_lock = None                # Soapy has no portable lock sensor
         return self.dev.getFrequency(self.RX, 0)
 
     def capture(self, num_samps: int, out) -> tuple:
@@ -420,15 +436,19 @@ class SdrCaptureManager:
         self._dev = None
         self._dev_id = ""
         self._buf = None                  # reusable int16 I/Q capture buffer (worker thread only)
+        self._tested_key = None           # RF settings the last self-test ran with
+        self._selftest_req = threading.Event()
+        self._reported_fail = ""          # last self-test failure sent to error(), to avoid repeats
         self._last_capture: dict = {}     # serial -> wall time
         self._dropped_sns: set = set()     # serials already counted as dropped while busy
         self._state = {
-            "state":        "disabled",   # disabled | opening | ready | capturing | error
+            "state":        "disabled",   # disabled | opening | testing | ready | capturing | error
             "device_name":  "",
             "last_error":   "",
             "captures":     0,
             "dropped":      0,
             "last_capture": None,
+            "self_test":    None,         # {ok, ran_at, elapsed_s, warnings, checks:[{name, level, detail}]}
         }
         CAPTURES_DIR.mkdir(parents=True, exist_ok=True)
         threading.Thread(target=self._worker, daemon=True, name="sdr-capture").start()
@@ -468,7 +488,7 @@ class SdrCaptureManager:
     def on_detection(self, drone: dict, sensor: dict | None = None):
         """Called for every parsed detection. Cheap; never blocks."""
         with self._lock:
-            if not self.cfg["enabled"] or self._state["state"] not in ("ready", "capturing"):
+            if not self.cfg["enabled"] or self._state["state"] not in ACCEPTING_STATES:
                 return
             sn = drone.get("serial_number") or "unknown"
             now = time.time()
@@ -490,12 +510,21 @@ class SdrCaptureManager:
         if not (FREQ_MIN_MHZ <= freq_mhz <= FREQ_MAX_MHZ):
             return {"ok": False, "error": f"frequency must be {FREQ_MIN_MHZ:.0f}-{FREQ_MAX_MHZ:.0f} MHz"}
         with self._lock:
-            if self._state["state"] not in ("ready", "capturing"):
+            if self._state["state"] not in ACCEPTING_STATES:
                 return {"ok": False, "error": f"SDR not ready (state: {self._state['state']})"}
         try:
             self._q.put_nowait({"drone": {}, "sensor": {}, "freq_mhz": freq_mhz, "reason": "manual test"})
         except queue.Full:
             return {"ok": False, "error": "a capture is already queued"}
+        return {"ok": True}
+
+    def request_self_test(self) -> dict:
+        """Ask the worker to re-run the self-test (and reopen the device if it is in error)."""
+        with self._lock:
+            if not self.cfg["enabled"] or not self.cfg["device"]:
+                return {"ok": False, "error": "SDR is disabled or no device is selected"}
+        self._selftest_req.set()
+        self._wake.set()
         return {"ok": True}
 
     def list_captures(self) -> list:
@@ -570,6 +599,7 @@ class SdrCaptureManager:
         self._dev = None
         self._dev_id = ""
         self._buf = None                  # release the capture buffer with the device
+        self._tested_key = None           # a reopened device is always re-tested
 
     @staticmethod
     def _capture_samples(cfg: dict) -> int:
@@ -608,6 +638,7 @@ class SdrCaptureManager:
         backend, _, args = cfg["device"].partition(":")
         self._set_state(state="opening", last_error="")
         print(f"[SDR] Opening {backend} device '{args}'")
+        t_open = time.time()
         try:
             if backend == "uhd":
                 if _uhd is None:
@@ -622,8 +653,9 @@ class SdrCaptureManager:
             self._dev_id = cfg["device"]
             self._dev.configure(cfg)
             opened = getattr(self._dev, "open_args", args)
-            print(f"[SDR] Ready: {self._dev.name} (args '{opened}') {self._dev.actual()}")
-            self._set_state(state="ready", device_name=self._dev.name)
+            print(f"[SDR] Opened: {self._dev.name} (args '{opened}') — {time.time() - t_open:.1f}s")
+            # "ready" is set by the self-test the worker runs next.
+            self._set_state(state="testing", device_name=self._dev.name)
             return True
         except Exception as e:
             self._close()
@@ -632,6 +664,128 @@ class SdrCaptureManager:
             self._error("SDR", msg)
             self._set_state(state="error", last_error=msg)
             return False
+
+    @staticmethod
+    def _rf_key(cfg: dict) -> tuple:
+        return (cfg["device"], cfg["sample_rate"], cfg["bandwidth"], cfg["gain"], cfg["antenna"])
+
+    def _self_test(self, cfg: dict, cfg_err: str = "") -> bool:
+        """Verify the open device took the settings, tunes, and streams cleanly.
+
+        Levels: ok / warn (captures still run, but check this) / fail (device is
+        closed and reopened later). Result goes into status()["self_test"].
+        """
+        t0 = time.time()
+        self._set_state(state="testing")
+        checks: list = []
+
+        def add(name, level, detail):
+            checks.append({"name": name, "level": level, "detail": detail})
+
+        try:
+            if cfg_err:
+                add("Configure", "fail", f"device rejected the settings: {cfg_err}")
+            act = self._dev.actual()
+
+            rate, got_rate = cfg["sample_rate"], float(act["sample_rate"])
+            if abs(got_rate - rate) > rate * 1e-3:
+                add("Sample rate", "warn", f"requested {rate / 1e6:.3f} Msps, device set "
+                    f"{got_rate / 1e6:.3f} Msps (captures record the actual rate)")
+            else:
+                add("Sample rate", "ok", f"{got_rate / 1e6:.3f} Msps")
+
+            got_gain = float(act["gain"])
+            if abs(got_gain - cfg["gain"]) > 1.0:
+                add("Gain", "warn", f"requested {cfg['gain']:.0f} dB, device set {got_gain:.1f} dB "
+                    "(outside the device's range?)")
+            else:
+                add("Gain", "ok", f"{got_gain:.1f} dB")
+
+            want_bw = cfg["bandwidth"] or rate
+            try:
+                got_bw = float(act["bandwidth"])
+            except (TypeError, ValueError):
+                got_bw = 0.0
+            if got_bw and abs(got_bw - want_bw) > want_bw * 0.05:
+                add("Bandwidth", "warn", f"requested {want_bw / 1e6:.2f} MHz, device set {got_bw / 1e6:.2f} MHz")
+            else:
+                add("Bandwidth", "ok", f"{got_bw / 1e6:.2f} MHz" if got_bw else "device default")
+
+            if cfg["antenna"] and act["antenna"] != cfg["antenna"]:
+                add("Antenna", "fail", f"requested '{cfg['antenna']}', device is on '{act['antenna']}'")
+            else:
+                add("Antenna", "ok", str(act["antenna"]) or "default")
+
+            # Tuning: both DroneID bands. One band failing is a warning; both is a failure.
+            tuned_ok = 0
+            for f_mhz in SELF_TEST_FREQS_MHZ:
+                if not (FREQ_MIN_MHZ <= f_mhz <= FREQ_MAX_MHZ):
+                    continue
+                got_f = float(self._dev.tune(f_mhz * 1e6))
+                lock = getattr(self._dev, "last_lock", None)
+                name = f"Tune {f_mhz / 1000:.1f} GHz"
+                if abs(got_f - f_mhz * 1e6) > 1e6:
+                    add(name, "warn", f"device tuned to {got_f / 1e6:.1f} MHz instead — "
+                        f"detections in this band can't be captured")
+                elif lock is False:
+                    add(name, "warn", "LO did not lock within 0.5 s")
+                else:
+                    tuned_ok += 1
+                    add(name, "ok", "locked" if lock else "tuned (lock not reported)")
+            if tuned_ok == 0:
+                add("Tuning", "fail", "could not tune either DroneID band (2.4 / 5.8 GHz)")
+
+            # Streaming: short priming stream (first one after open may hiccup), then measure.
+            n = max(1, min(self._capture_samples(cfg), int(rate * SELF_TEST_STREAM_S)))
+            if self._buf is not None and self._buf.size >= 2 * n:
+                buf = self._buf[: 2 * n]
+            else:
+                buf = _np.empty(2 * n, dtype=_np.int16)
+            self._dev.capture(max(1, min(n, int(rate * SELF_TEST_PRIME_S))), buf)
+            ts = time.time()
+            got, overflows = self._dev.capture(n, buf)
+            elapsed = time.time() - ts
+            if got == 0:
+                add("Stream", "fail", "no samples received")
+            elif overflows or got < n:
+                add("Stream", "warn", f"{got}/{n} samples, {overflows} overflow(s) in a "
+                    f"{n / rate:.2f} s test — check the SDR is on a USB 3 port and the host isn't overloaded")
+            else:
+                add("Stream", "ok", f"{got} samples in {elapsed:.2f} s, no overflows")
+
+            if got:
+                s = buf[: 2 * min(got, 1 << 20)].astype(_np.int32)   # ≤1M samples is plenty
+                peak = int(_np.abs(s).max())
+                clipped = float(_np.count_nonzero(_np.abs(s) >= CLIP_LEVEL)) / s.size
+                rms = float(_np.sqrt(_np.mean(s.astype(_np.float64) ** 2)))
+                if peak == 0:
+                    add("Signal", "fail", "samples are all zero — check the antenna port and gain")
+                elif clipped > 0.001:
+                    add("Signal", "warn", f"{clipped * 100:.1f}% of samples clipped (peak {peak}) — lower the gain")
+                else:
+                    add("Signal", "ok", f"peak {peak}, RMS {rms:.0f} (int16 full scale 32767)")
+        except Exception as e:
+            add("Self-test", "fail", f"{type(e).__name__}: {e}")
+
+        fails = [c for c in checks if c["level"] == "fail"]
+        warns = [c for c in checks if c["level"] == "warn"]
+        ok = not fails
+        result = {"ok": ok, "ran_at": time.time(), "elapsed_s": round(time.time() - t0, 2),
+                  "warnings": len(warns), "checks": checks}
+        summary = "; ".join(f"{c['name']}: {c['detail']}" for c in (fails or warns))
+        print(f"[SDR] Self-test {'passed' if ok else 'FAILED'} in {result['elapsed_s']}s"
+              + (f" — {summary}" if summary else ""))
+        if ok:
+            self._reported_fail = ""
+            self._set_state(state="ready", self_test=result,
+                            last_error=f"self-test: {summary}" if warns else "")
+        else:
+            msg = f"self-test failed — {summary}"
+            if msg != self._reported_fail:       # don't repeat the same alert every retry
+                self._reported_fail = msg
+                self._error("SDR", msg)
+            self._set_state(state="error", self_test=result, last_error=msg)
+        return ok
 
     def _worker(self):
         retry_at = 0.0
@@ -645,10 +799,11 @@ class SdrCaptureManager:
             else:
                 ready = self._dev is not None
             if ready:
+                cfg_err = ""
                 try:
                     self._dev.configure(cfg)
                 except Exception as e:
-                    self._error("SDR", f"configure failed: {e}")
+                    cfg_err = str(e) or type(e).__name__
                 # Allocate/resize the capture buffer here, off the trigger path.
                 need = 2 * self._capture_samples(cfg)
                 if need != buf_failed_size:
@@ -662,6 +817,15 @@ class SdrCaptureManager:
                                "— lower sample rate or duration")
                         self._error("SDR", msg)
                         self._set_state(last_error=msg)
+                # Self-test after open, after any RF setting change, or on request.
+                key = self._rf_key(cfg)
+                if key != self._tested_key or self._selftest_req.is_set():
+                    self._selftest_req.clear()
+                    self._tested_key = key
+                    if not self._self_test(cfg, cfg_err):
+                        self._close()            # also clears _tested_key → re-test on reopen
+                        retry_at = time.time() + 15
+                        continue
             try:
                 req = self._q.get(timeout=1.0)
             except queue.Empty:
