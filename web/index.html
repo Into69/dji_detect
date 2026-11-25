@@ -1228,16 +1228,16 @@
       <div class="cfg-rows">
         <div id="sdr-status" style="font-size:12px;color:#8b949e;line-height:1.5">—</div>
         <div id="sdr-selftest" style="font-size:12px;color:#8b949e;line-height:1.5"></div>
-        <div class="cfg-btn-row">
-          <button class="cfg-btn" id="sdr-selftest-run">Run self-test</button>
-        </div>
         <div class="cfg-row">
           <label>Test at</label>
           <div class="cfg-input-suffix">
             <input id="sdr-test-freq" class="cfg-input" type="number" min="50" max="6000" step="0.5" value="2437" />
             <span class="cfg-suffix">MHz</span>
           </div>
-          <button class="cfg-btn" id="sdr-test" style="flex:0 0 auto">Capture now</button>
+        </div>
+        <div class="cfg-btn-row">
+          <button class="cfg-btn" id="sdr-selftest-run">Run self-test</button>
+          <button class="cfg-btn" id="sdr-test" title="Record a test capture at the frequency above">Capture now</button>
         </div>
       </div>
     </div>
