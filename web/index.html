@@ -2036,7 +2036,9 @@ function upsertSensor(pos) {
   const hasfix   = pos.mode >= 2;
   const altStr   = pos.alt != null ? pos.alt.toFixed(1)+' m' : 'N/A';
   const fixLabel = pos.mode === 3 ? '3D' : pos.mode === 2 ? '2D' : 'No fix';
-  const satsStr  = `${pos.sats_used??'?'} used / ${pos.sats_visible??'?'} visible`;
+  const satsStr  = (pos.sats_used || pos.sats_visible)
+    ? `${pos.sats_used ?? '?'} used / ${pos.sats_visible ?? '?'} visible`
+    : '—';
 
   if (pos.last_fix_wall_time) lastFixWallTime = pos.last_fix_wall_time;
 
