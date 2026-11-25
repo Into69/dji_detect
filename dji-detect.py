@@ -19,6 +19,7 @@ try:
     import serial as _serial
     _SERIAL_OK = True
 except ImportError:
+    _serial = None
     _SERIAL_OK = False
 import socket
 import threading
@@ -1523,7 +1524,7 @@ def _kill_port_holders(port: str):
 
 def _serial_loop():
     """Open serial port and read lines from ANTsdr."""
-    if not _SERIAL_OK:
+    if _serial is None:
         raise RuntimeError("pyserial not installed — run: pip install pyserial")
     port = antsdr_config["serial_port"]
     baud = antsdr_config["serial_baud"]
@@ -2231,16 +2232,23 @@ def _read_json_body(environ) -> dict:
     return body if isinstance(body, dict) else {}
 
 
+def _sdr() -> sdr_capture.SdrCaptureManager:
+    """The SDR manager; the router only calls /sdr/* handlers once it exists."""
+    if sdr_manager is None:
+        raise RuntimeError("SDR capture manager not initialised")
+    return sdr_manager
+
+
 def handle_sdr_config_get(start_response):
     return _json_response(start_response, {
-        "config": sdr_manager.config(),
+        "config": _sdr().config(),
         "limits": sdr_capture.LIMITS,
     })
 
 
 def handle_sdr_config_post(environ, start_response):
     try:
-        cfg = sdr_manager.update_config(_read_json_body(environ))
+        cfg = _sdr().update_config(_read_json_body(environ))
         antsdr_config["sdr"] = cfg
         save_config()
         return _json_response(start_response, {"ok": True, "config": cfg})
@@ -2253,7 +2261,7 @@ def handle_sdr_test(environ, start_response):
         freq = float(_read_json_body(environ).get("freq_mhz", 0))
     except (TypeError, ValueError):
         freq = 0.0
-    result = sdr_manager.test_capture(freq)
+    result = _sdr().test_capture(freq)
     return _json_response(start_response, result, "200 OK" if result.get("ok") else "400 Bad Request")
 
 
@@ -2261,7 +2269,7 @@ def handle_sdr_capture_download(environ, start_response):
     qs = parse_qs(environ.get("QUERY_STRING", "") or "")
     name = (qs.get("name") or [""])[0]
     part = (qs.get("part") or ["data"])[0]
-    path = sdr_manager.capture_path(name, part)
+    path = _sdr().capture_path(name, part)
     if path is None:
         return handle_not_found(start_response)
     size = path.stat().st_size
@@ -2287,7 +2295,7 @@ def handle_sdr_capture_download(environ, start_response):
 def handle_sdr_capture_delete(environ, start_response):
     try:
         name = str(_read_json_body(environ).get("name", ""))
-        if not sdr_manager.delete_capture(name):
+        if not _sdr().delete_capture(name):
             return _json_response(start_response, {"ok": False, "error": "not found"}, "404 Not Found")
         return _json_response(start_response, {"ok": True})
     except Exception as e:
