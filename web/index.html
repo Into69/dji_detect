@@ -157,10 +157,11 @@
     #cfg-tabs {
       display: flex;
       flex-shrink: 0;
+      flex-wrap: wrap;
       border-bottom: 1px solid #30363d;
-      overflow-x: auto;
       background: #161b22;
     }
+    #cfg-tabs .cfg-tab { flex: 1 1 auto; padding: 8px 8px; }
     #cfg-tabs::-webkit-scrollbar { height: 4px; }
     #cfg-tabs::-webkit-scrollbar-track { background: transparent; }
     #cfg-tabs::-webkit-scrollbar-thumb { background: #30363d; border-radius: 2px; }
