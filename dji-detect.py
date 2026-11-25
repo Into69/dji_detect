@@ -25,6 +25,9 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from urllib.parse import parse_qs
+
+import sdr_capture
 
 import logging
 
@@ -77,7 +80,10 @@ antsdr_config: dict = {
     "tak_protocol":    "udp",       # "udp" or "tcp"
     "tak_host":        "",
     "tak_port":        8087,
+    # External SDR IQ capture on detection (see sdr_capture.py)
+    "sdr":             dict(sdr_capture.DEFAULTS),
 }
+sdr_manager = None  # sdr_capture.SdrCaptureManager, created in __main__
 antsdr_reconnect = threading.Event()  # set to force receiver to reconnect
 antsdr_connected: bool = False        # True while we are receiving datagrams from ANTsdr
 serial_stats: dict = {
@@ -236,6 +242,8 @@ def load_config():
                 antsdr_config[cfg_key] = cast(saved[json_key])
         if isinstance(saved.get("geofence_zones"), list):
             antsdr_config["geofence_zones"] = _sanitize_zones(saved["geofence_zones"])
+        if isinstance(saved.get("sdr"), dict):
+            antsdr_config["sdr"] = sdr_capture.sanitize_config(saved["sdr"])
         if isinstance(saved.get("range_ring_radii_m"), list):
             antsdr_config["range_ring_radii_m"] = _sanitize_ring_radii(saved["range_ring_radii_m"])
         # Migrate legacy connection_type values to the unified "network" listener.
@@ -285,6 +293,7 @@ def save_config():
         "tak_host":        antsdr_config["tak_host"],
         "tak_port":        antsdr_config["tak_port"],
         "geofence_zones":  antsdr_config["geofence_zones"],
+        "sdr":             antsdr_config["sdr"],
     }, indent=2))
 
 
@@ -444,6 +453,7 @@ def _parse_antsdr_line(line: str) -> dict | None:
         return {
             "serial_number":      serial,
             "device_type":        model,
+            "protocol":           protocol,
             "freq":               freq,
             "rssi":               rssi,
             "drone_lon":          drone_lon,
@@ -1286,6 +1296,10 @@ def _process_line(line: str):
 
     # TAK — every detection message
     _io_executor.submit(_send_tak, snapshot)
+
+    # External SDR IQ capture — live RF only, never for replayed lines.
+    if sdr_manager is not None and not _replay_state.get("active"):
+        sdr_manager.on_detection(snapshot, {"lat": s_lat, "lon": s_lon, "alt": s_alt})
 
     broadcast({"type": "update", "drone": data})
 
@@ -2158,6 +2172,82 @@ def handle_record_replay_seek(environ, start_response):
     return _json_response(start_response, result, "200 OK" if result.get("ok") else "400 Bad Request")
 
 
+# --- External SDR capture ---
+
+def _read_json_body(environ) -> dict:
+    try:
+        length = int(environ.get("CONTENT_LENGTH", 0) or 0)
+    except ValueError:
+        length = 0
+    if length <= 0:
+        return {}
+    body = json.loads(environ["wsgi.input"].read(length) or b"{}")
+    return body if isinstance(body, dict) else {}
+
+
+def handle_sdr_config_get(start_response):
+    return _json_response(start_response, {
+        "config": sdr_manager.config(),
+        "limits": sdr_capture.LIMITS,
+    })
+
+
+def handle_sdr_config_post(environ, start_response):
+    try:
+        cfg = sdr_manager.update_config(_read_json_body(environ))
+        antsdr_config["sdr"] = cfg
+        save_config()
+        return _json_response(start_response, {"ok": True, "config": cfg})
+    except Exception as e:
+        return _json_response(start_response, {"ok": False, "error": str(e)}, "400 Bad Request")
+
+
+def handle_sdr_test(environ, start_response):
+    try:
+        freq = float(_read_json_body(environ).get("freq_mhz", 0))
+    except (TypeError, ValueError):
+        freq = 0.0
+    result = sdr_manager.test_capture(freq)
+    return _json_response(start_response, result, "200 OK" if result.get("ok") else "400 Bad Request")
+
+
+def handle_sdr_capture_download(environ, start_response):
+    qs = parse_qs(environ.get("QUERY_STRING", "") or "")
+    name = (qs.get("name") or [""])[0]
+    part = (qs.get("part") or ["data"])[0]
+    path = sdr_manager.capture_path(name, part)
+    if path is None:
+        return handle_not_found(start_response)
+    size = path.stat().st_size
+    start_response("200 OK", [
+        ("Content-Type", "application/json" if part == "meta" else "application/octet-stream"),
+        ("Content-Length", str(size)),
+        ("Content-Disposition", f'attachment; filename="{path.name}"'),
+    ])
+    fh = path.open("rb")
+    wrapper = environ.get("wsgi.file_wrapper")
+    if wrapper:
+        return wrapper(fh, 1024 * 1024)
+    def _chunks():
+        with fh:
+            while True:
+                chunk = fh.read(1024 * 1024)
+                if not chunk:
+                    break
+                yield chunk
+    return _chunks()
+
+
+def handle_sdr_capture_delete(environ, start_response):
+    try:
+        name = str(_read_json_body(environ).get("name", ""))
+        if not sdr_manager.delete_capture(name):
+            return _json_response(start_response, {"ok": False, "error": "not found"}, "404 Not Found")
+        return _json_response(start_response, {"ok": True})
+    except Exception as e:
+        return _json_response(start_response, {"ok": False, "error": str(e)}, "400 Bad Request")
+
+
 def handle_not_found(start_response):
     start_response("404 Not Found", [("Content-Type", "text/plain")])
     return [b"Not Found"]
@@ -2418,6 +2508,23 @@ def application(environ, start_response):
     if path == "/map-cache":
         return handle_map_cache(environ, start_response)
 
+    if path.startswith("/sdr/") and sdr_manager is not None:
+        if path == "/sdr/config":
+            if method == "GET":  return handle_sdr_config_get(start_response)
+            if method == "POST": return handle_sdr_config_post(environ, start_response)
+        if path == "/sdr/status" and method == "GET":
+            return _json_response(start_response, sdr_manager.status())
+        if path == "/sdr/devices" and method == "GET":
+            return _json_response(start_response, sdr_manager.devices())
+        if path == "/sdr/test" and method == "POST":
+            return handle_sdr_test(environ, start_response)
+        if path == "/sdr/captures" and method == "GET":
+            return _json_response(start_response, {"captures": sdr_manager.list_captures()})
+        if path == "/sdr/captures/download" and method == "GET":
+            return handle_sdr_capture_download(environ, start_response)
+        if path == "/sdr/captures/delete" and method == "POST":
+            return handle_sdr_capture_delete(environ, start_response)
+
     if path == "/history":
         return handle_history(environ, start_response)
 
@@ -2521,6 +2628,9 @@ if __name__ == "__main__":
         antsdr_config["port"] = args.antsdr_port
     if args.antsdr_tcp_port != parser.get_default("antsdr_tcp_port"):
         antsdr_config["tcp_port"] = args.antsdr_tcp_port
+
+    sdr_manager = sdr_capture.SdrCaptureManager(
+        antsdr_config["sdr"], broadcast=broadcast, error=broadcast_error, version=VERSION)
 
     threading.Thread(
         target=antsdr_receiver,

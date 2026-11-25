@@ -765,6 +765,7 @@
       <button class="cfg-tab" data-pane="cfg-pane-alerts">Alerts</button>
       <button class="cfg-tab" data-pane="cfg-pane-tak">TAK</button>
       <button class="cfg-tab" data-pane="cfg-pane-data">Data</button>
+      <button class="cfg-tab" data-pane="cfg-pane-sdr">SDR</button>
       <button class="cfg-tab" data-pane="cfg-pane-updates">Updates</button>
     </div>
     <div class="cfg-tab-content">
@@ -1148,6 +1149,101 @@
     </div>
 
     </div><!-- /cfg-pane-data -->
+
+    <div class="cfg-tab-pane" id="cfg-pane-sdr">
+    <!-- External SDR capture -->
+    <div class="cfg-section">
+      <div class="cfg-section-title">External SDR Capture</div>
+      <div class="cfg-rows">
+        <div style="font-size:11px;color:#8b949e;line-height:1.4">
+          When a drone is detected, tune an external SDR (e.g. Ettus B206mini) to the reported
+          frequency and record raw IQ to <code>sdr_captures/</code> as SigMF for offline decoding.
+        </div>
+        <div class="cfg-row">
+          <label>Enabled</label>
+          <input id="sdr-enabled" type="checkbox" />
+        </div>
+        <div class="cfg-row">
+          <label>Device</label>
+          <select id="sdr-device" class="cfg-select" style="flex:1;min-width:0"><option value="">— none —</option></select>
+          <button class="cfg-btn" id="sdr-scan" style="flex:0 0 auto">Scan</button>
+        </div>
+        <div id="sdr-backends" style="font-size:11px;color:#6e7681;min-height:14px"></div>
+        <div class="cfg-row">
+          <label>Sample rate</label>
+          <div class="cfg-input-suffix">
+            <input id="sdr-rate" class="cfg-input" type="number" min="1" max="61.44" step="0.01" />
+            <span class="cfg-suffix">Msps</span>
+          </div>
+        </div>
+        <div class="cfg-row">
+          <label>Bandwidth</label>
+          <div class="cfg-input-suffix">
+            <input id="sdr-bw" class="cfg-input" type="number" min="0" max="61.44" step="0.01" placeholder="0 = auto" />
+            <span class="cfg-suffix">MHz</span>
+          </div>
+        </div>
+        <div class="cfg-row">
+          <label>Gain</label>
+          <div class="cfg-input-suffix">
+            <input id="sdr-gain" class="cfg-input" type="number" min="0" max="90" step="1" />
+            <span class="cfg-suffix">dB</span>
+          </div>
+        </div>
+        <div class="cfg-row">
+          <label>Antenna</label>
+          <input id="sdr-antenna" class="cfg-input" type="text" placeholder="default (B2xx: RX2 or TX/RX)" />
+        </div>
+        <div class="cfg-row">
+          <label>Duration</label>
+          <div class="cfg-input-suffix">
+            <input id="sdr-duration" class="cfg-input" type="number" min="0.05" max="10" step="0.1" />
+            <span class="cfg-suffix">s / capture</span>
+          </div>
+        </div>
+        <div class="cfg-row">
+          <label>Cooldown</label>
+          <div class="cfg-input-suffix">
+            <input id="sdr-cooldown" class="cfg-input" type="number" min="0" max="86400" step="1" />
+            <span class="cfg-suffix">s / drone</span>
+          </div>
+        </div>
+        <div class="cfg-row">
+          <label>Max storage</label>
+          <div class="cfg-input-suffix">
+            <input id="sdr-max-gb" class="cfg-input" type="number" min="0.1" step="0.5" />
+            <span class="cfg-suffix">GB</span>
+          </div>
+        </div>
+        <div id="sdr-size-hint" style="font-size:11px;color:#6e7681"></div>
+        <div class="cfg-btn-row">
+          <button class="cfg-btn" id="sdr-save">Save SDR settings</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="cfg-section">
+      <div class="cfg-section-title">Status</div>
+      <div class="cfg-rows">
+        <div id="sdr-status" style="font-size:12px;color:#8b949e;line-height:1.5">—</div>
+        <div class="cfg-row">
+          <label>Test at</label>
+          <div class="cfg-input-suffix">
+            <input id="sdr-test-freq" class="cfg-input" type="number" min="50" max="6000" step="0.5" value="2437" />
+            <span class="cfg-suffix">MHz</span>
+          </div>
+          <button class="cfg-btn" id="sdr-test" style="flex:0 0 auto">Capture now</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="cfg-section">
+      <div class="cfg-section-title">Captures</div>
+      <div class="cfg-rows">
+        <div id="sdr-capture-list" style="display:flex;flex-direction:column;gap:6px"></div>
+      </div>
+    </div>
+    </div><!-- /cfg-pane-sdr -->
 
     <div class="cfg-tab-pane" id="cfg-pane-updates">
     <!-- Updates -->
@@ -2234,6 +2330,8 @@ function connect() {
     else if (msg.type === 'serial_status') updateSerialStatus(msg.stats);
     else if (msg.type === 'zone_alert')    showZoneAlertPopup(msg.drone, msg.zone);
     else if (msg.type === 'replay_status') updateReplayStatus(msg);
+    else if (msg.type === 'sdr_status')    renderSdrStatus(msg.status);
+    else if (msg.type === 'sdr_capture')   onSdrCapture(msg.capture);
   };
   es.onerror = () => { es.close(); setTimeout(connect, 3000); };
 }
@@ -3070,8 +3168,183 @@ document.querySelectorAll('.cfg-tab').forEach(tab => {
   tab.addEventListener('click', () => {
     if (tab.dataset.pane === 'cfg-pane-data') startRecPoll();
     else stopRecPoll();
+    if (tab.dataset.pane === 'cfg-pane-sdr') openSdrPane();
   });
 });
+
+
+// ── External SDR capture ──────────────────────────────────────────────────
+const sdrEl = id => document.getElementById(id);
+let _sdrConfig = null;
+let _sdrDevicesScanned = false;
+
+function openSdrPane() {
+  loadSdrConfig();
+  refreshSdrStatus();
+  refreshSdrCaptures();
+  if (!_sdrDevicesScanned) scanSdrDevices();
+}
+
+function loadSdrConfig() {
+  fetch('/sdr/config').then(r => r.json()).then(({config}) => {
+    _sdrConfig = config;
+    sdrEl('sdr-enabled').checked = !!config.enabled;
+    ensureSdrDeviceOption(config.device);
+    sdrEl('sdr-device').value   = config.device || '';
+    sdrEl('sdr-rate').value     = +(config.sample_rate / 1e6).toFixed(3);
+    sdrEl('sdr-bw').value       = +(config.bandwidth / 1e6).toFixed(3);
+    sdrEl('sdr-gain').value     = config.gain;
+    sdrEl('sdr-antenna').value  = config.antenna || '';
+    sdrEl('sdr-duration').value = config.duration_s;
+    sdrEl('sdr-cooldown').value = config.cooldown_s;
+    sdrEl('sdr-max-gb').value   = config.max_storage_gb;
+    updateSdrSizeHint();
+  }).catch(() => {});
+}
+
+function ensureSdrDeviceOption(id) {
+  if (!id) return;
+  const sel = sdrEl('sdr-device');
+  if (![...sel.options].some(o => o.value === id)) {
+    const o = document.createElement('option');
+    o.value = id; o.textContent = id + ' (saved)';
+    sel.appendChild(o);
+  }
+}
+
+function scanSdrDevices() {
+  _sdrDevicesScanned = true;
+  const sel = sdrEl('sdr-device');
+  const keep = sel.value || (_sdrConfig && _sdrConfig.device) || '';
+  sdrEl('sdr-scan').disabled = true;
+  sdrEl('sdr-backends').textContent = 'Scanning for SDRs…';
+  fetch('/sdr/devices').then(r => r.json()).then(({devices, backends}) => {
+    sel.innerHTML = '<option value="">— none —</option>';
+    devices.forEach(d => {
+      const o = document.createElement('option');
+      o.value = d.id; o.textContent = d.label;
+      sel.appendChild(o);
+    });
+    ensureSdrDeviceOption(keep);
+    sel.value = keep;
+    const b = backends || {};
+    const flag = (ok, name) => `<span style="color:${ok ? '#3fb950' : '#f85149'}">${ok ? '✓' : '✗'} ${name}</span>`;
+    sdrEl('sdr-backends').innerHTML =
+      `${devices.length} device${devices.length === 1 ? '' : 's'} found · ` +
+      [flag(b.numpy, 'numpy'), flag(b.uhd, 'UHD'), flag(b.soapy, 'SoapySDR')].join(' · ') +
+      (!b.numpy ? '<br>numpy is required: <code>pip install numpy</code>' : '') +
+      (!b.uhd && !b.soapy ? '<br>Install UHD (with python bindings) for Ettus devices.' : '');
+  }).catch(() => { sdrEl('sdr-backends').textContent = 'Scan failed.'; })
+    .finally(() => { sdrEl('sdr-scan').disabled = false; });
+}
+
+function updateSdrSizeHint() {
+  const rate = parseFloat(sdrEl('sdr-rate').value) || 0;
+  const dur  = parseFloat(sdrEl('sdr-duration').value) || 0;
+  sdrEl('sdr-size-hint').textContent = rate && dur
+    ? `≈ ${fmtBytes(rate * 1e6 * dur * 4)} per capture (int16 I/Q)` : '';
+}
+['sdr-rate', 'sdr-duration'].forEach(id => sdrEl(id).addEventListener('input', updateSdrSizeHint));
+
+function saveSdrConfig() {
+  const payload = {
+    enabled:        sdrEl('sdr-enabled').checked,
+    device:         sdrEl('sdr-device').value,
+    sample_rate:    (parseFloat(sdrEl('sdr-rate').value) || 15.36) * 1e6,
+    bandwidth:      (parseFloat(sdrEl('sdr-bw').value) || 0) * 1e6,
+    gain:           parseFloat(sdrEl('sdr-gain').value) || 0,
+    antenna:        sdrEl('sdr-antenna').value.trim(),
+    duration_s:     parseFloat(sdrEl('sdr-duration').value) || 2,
+    cooldown_s:     Math.max(0, parseInt(sdrEl('sdr-cooldown').value, 10) || 0),
+    max_storage_gb: parseFloat(sdrEl('sdr-max-gb').value) || 10,
+  };
+  if (payload.enabled && !payload.device) { showToast('Select an SDR device first.', 'err'); return; }
+  fetch('/sdr/config', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
+  }).then(r => r.json()).then(r => {
+    if (!r.ok) { showToast('SDR save error: ' + (r.error || 'unknown'), 'err'); return; }
+    _sdrConfig = r.config;
+    showToast(r.config.enabled ? 'SDR capture enabled.' : 'SDR settings saved (capture disabled).', 'ok');
+    loadSdrConfig();
+    setTimeout(refreshSdrStatus, 500);
+  }).catch(() => showToast('Request failed.', 'err'));
+}
+sdrEl('sdr-save').addEventListener('click', saveSdrConfig);
+sdrEl('sdr-scan').addEventListener('click', scanSdrDevices);
+
+function refreshSdrStatus() {
+  fetch('/sdr/status').then(r => r.json()).then(renderSdrStatus).catch(() => {});
+}
+
+function renderSdrStatus(st) {
+  if (!st) return;
+  const colors = { disabled: '#6e7681', opening: '#d29922', ready: '#3fb950', capturing: '#58a6ff', error: '#f85149' };
+  const lines = [
+    `<span style="color:${colors[st.state] || '#8b949e'};font-weight:600">${escHtml((st.state || '').toUpperCase())}</span>` +
+      (st.device_name ? ` · ${escHtml(st.device_name)}` : ''),
+    `Captures this session: ${st.captures || 0}` + (st.dropped ? ` · dropped while busy: ${st.dropped}` : '') +
+      (st.storage_bytes != null ? ` · on disk: ${fmtBytes(st.storage_bytes)}` : ''),
+  ];
+  if (st.last_capture) {
+    const c = st.last_capture;
+    lines.push(`Last: ${escHtml(c.serial)} @ ${c.freq_mhz.toFixed(1)} MHz · ${fmtBytes(c.bytes)}` +
+      (c.overflows ? ` · <span style="color:#d29922">${c.overflows} overflow(s)</span>` : ''));
+  }
+  if (st.last_error) lines.push(`<span style="color:#f85149">${escHtml(st.last_error)}</span>`);
+  sdrEl('sdr-status').innerHTML = lines.join('<br>');
+}
+
+function onSdrCapture(c) {
+  showToast(`SDR captured ${c.serial} @ ${c.freq_mhz.toFixed(1)} MHz`, 'ok');
+  if (sdrEl('cfg-pane-sdr').classList.contains('active')) refreshSdrCaptures();
+}
+
+sdrEl('sdr-test').addEventListener('click', () => {
+  const freq = parseFloat(sdrEl('sdr-test-freq').value);
+  fetch('/sdr/test', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ freq_mhz: freq }),
+  }).then(r => r.json()).then(r => {
+    showToast(r.ok ? `Test capture queued @ ${freq} MHz` : ('Test failed: ' + r.error), r.ok ? 'ok' : 'err');
+  }).catch(() => showToast('Request failed.', 'err'));
+});
+
+function refreshSdrCaptures() {
+  fetch('/sdr/captures').then(r => r.json()).then(({captures}) => {
+    const el = sdrEl('sdr-capture-list');
+    if (!captures.length) {
+      el.innerHTML = '<div style="font-size:11px;color:#6e7681;padding:6px 0">No captures yet.</div>';
+      return;
+    }
+    el.innerHTML = captures.map(c => {
+      const t = c.trigger || {}, k = c.capture || {};
+      const freq = c.freq_hz ? (c.freq_hz / 1e6).toFixed(1) + ' MHz' : '?';
+      const rate = c.sample_rate ? (c.sample_rate / 1e6).toFixed(2) + ' Msps' : '';
+      const who  = t.serial_number ? `${escHtml(t.device_type || '')} ${escHtml(t.serial_number)}` : 'Manual test';
+      const when = c.datetime ? new Date(c.datetime).toLocaleString() : '';
+      const n = encodeURIComponent(c.name);
+      return `
+        <div style="border:1px solid #30363d;border-radius:6px;padding:8px;display:flex;flex-direction:column;gap:4px">
+          <div style="display:flex;justify-content:space-between;gap:8px;align-items:center">
+            <div style="font-weight:600;font-size:12px">${who}</div>
+            <div style="font-size:11px;color:#6e7681;white-space:nowrap">${fmtBytes(c.size)}</div>
+          </div>
+          <div style="font-size:11px;color:#8b949e">${freq} · ${rate}${t.rssi != null ? ' · RSSI ' + t.rssi : ''}${k.overflows ? ' · <span style="color:#d29922">' + k.overflows + ' overflow(s)</span>' : ''}</div>
+          <div style="font-size:11px;color:#6e7681;word-break:break-all">${escHtml(when)} · ${escHtml(c.name)}</div>
+          <div class="cfg-btn-row" style="margin-top:4px">
+            <a class="cfg-btn" style="text-align:center;text-decoration:none" href="/sdr/captures/download?part=data&name=${n}">IQ data</a>
+            <a class="cfg-btn" style="text-align:center;text-decoration:none" href="/sdr/captures/download?part=meta&name=${n}">Metadata</a>
+            <button class="cfg-btn sdr-del" data-name="${escHtml(c.name)}" style="color:#f85149">Delete</button>
+          </div>
+        </div>`;
+    }).join('');
+    el.querySelectorAll('.sdr-del').forEach(b => b.addEventListener('click', () => {
+      if (!confirm('Delete capture ' + b.dataset.name + '?')) return;
+      fetch('/sdr/captures/delete', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: b.dataset.name }),
+      }).then(() => { refreshSdrCaptures(); refreshSdrStatus(); });
+    }));
+  }).catch(() => {});
+}
 
 
 // ── Updates ───────────────────────────────────────────────────────────────
