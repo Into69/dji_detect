@@ -19,6 +19,7 @@ try:
     import serial as _serial
     _SERIAL_OK = True
 except ImportError:
+    _serial = None
     _SERIAL_OK = False
 import socket
 import threading
@@ -26,6 +27,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from urllib.parse import parse_qs
+from xml.sax.saxutils import escape as xml_escape
 
 import sdr_capture
 
@@ -314,7 +316,10 @@ def load_history():
 def save_history():
     """Persist drone_history to history.txt."""
     try:
-        HISTORY_FILE.write_text(json.dumps(drone_history, indent=2))
+        # Serialize under the lock: detections mutate drone_history concurrently.
+        with data_lock:
+            text = json.dumps(drone_history, indent=2)
+        HISTORY_FILE.write_text(text)
     except Exception as e:
         print(f"[History] Failed to save {HISTORY_FILE}: {e}")
 
@@ -423,7 +428,8 @@ def _parse_antsdr_line(line: str) -> dict | None:
         home_lat  = flt(fields[11])
 
         alt_parts    = fields[12].split("|")
-        # firmware sends altitude in decimetres — multiply by 10 for metres
+        # firmware's altitude field is scaled down by 10 — multiply by 10 for metres
+        # (same conversion as the upstream dji_receiver.py)
         geodetic_alt = flt(alt_parts[0]) * 10.0
         height_agl   = flt(alt_parts[1]) if len(alt_parts) > 1 else 0.0
 
@@ -752,6 +758,9 @@ _discord_last_sent: dict = {} # serial -> last alert wall time
 
 # --- TAK CoT sender ---
 
+_XML_ATTR = {"'": "&apos;", '"': "&quot;"}
+
+
 def _cot_time(t: float, offset: float = 0.0) -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime(t + offset))
 
@@ -766,6 +775,11 @@ def _build_cot_event(uid: str, cot_type: str, lat: float, lon: float, hae: float
     track_xml = ""
     if course is not None and speed is not None:
         track_xml = f"<track course='{course:.1f}' speed='{speed:.2f}'/>"
+    # uid/callsign/remarks carry the sensor name and RF-supplied serial/model —
+    # escape them so quotes or <&> can't break or inject into the CoT XML.
+    uid      = xml_escape(str(uid), _XML_ATTR)
+    callsign = xml_escape(str(callsign), _XML_ATTR)
+    remarks  = xml_escape(str(remarks))
     xml = (
         "<?xml version='1.0' standalone='yes'?>"
         f"<event version='2.0' uid='{uid}' type='{cot_type}'"
@@ -1196,8 +1210,9 @@ def _process_line(line: str, replayed: bool = False):
         s_lon = sensor_position.get("lon")
         s_alt = sensor_position.get("alt")
     # Recording — append-only NDJSON, written under its own lock to avoid blocking parse.
+    # Replayed lines are not re-recorded (they'd be stamped with the wrong time).
     with _recording_lock:
-        if _recording_state["active"] and _recording_state["path"]:
+        if not replayed and _recording_state["active"] and _recording_state["path"]:
             entry = {"t": now, "line": stripped}
             if s_lat is not None and s_lon is not None:
                 entry["sensor"] = {"lat": s_lat, "lon": s_lon}
@@ -1220,8 +1235,9 @@ def _process_line(line: str, replayed: bool = False):
     with data_lock:
         drone_data[sn] = data
         drone_history[sn] = data
-        # Check discord throttle under lock to avoid race condition
-        if now - _discord_last_sent.get(sn, 0) >= DISCORD_ALERT_INTERVAL:
+        # Check discord throttle under lock to avoid race condition.
+        # Replayed lines never send external alerts (Discord/TAK) — it's old data.
+        if not replayed and now - _discord_last_sent.get(sn, 0) >= DISCORD_ALERT_INTERVAL:
             _discord_last_sent[sn] = now
             send_discord = True
 
@@ -1256,7 +1272,8 @@ def _process_line(line: str, replayed: bool = False):
                 if not was_inside or (now - last) >= cooldown * 2:
                     _proximity_last_alert[sn] = now
                     brg = _bearing_deg(slat, slon, dlat, dlon)
-                    _io_executor.submit(_send_discord_proximity_alert, snapshot, dist, brg)
+                    if not replayed:
+                        _io_executor.submit(_send_discord_proximity_alert, snapshot, dist, brg)
         else:
             _proximity_inside.pop(sn, None)
             _proximity_last_alert.pop(sn, None)
@@ -1285,7 +1302,8 @@ def _process_line(line: str, replayed: bool = False):
                     if not was_inside or (now - last) >= cooldown * 2:
                         _zone_last_alert[key] = now
                         broadcast({"type": "zone_alert", "drone": snapshot, "zone": zone})
-                        _io_executor.submit(_send_discord_zone_alert, snapshot, zone)
+                        if not replayed:
+                            _io_executor.submit(_send_discord_zone_alert, snapshot, zone)
             elif was_inside:
                 broadcast({"type": "zone_status", "serial": sn, "zone_id": zid, "inside": False})
     else:
@@ -1294,8 +1312,9 @@ def _process_line(line: str, replayed: bool = False):
             _zone_inside.pop(key, None)
             _zone_last_alert.pop(key, None)
 
-    # TAK — every detection message
-    _io_executor.submit(_send_tak, snapshot)
+    # TAK — every live detection message (replayed positions would look live in TAK)
+    if not replayed:
+        _io_executor.submit(_send_tak, snapshot)
 
     # External SDR IQ capture — live RF only, never for replayed lines.
     # Per-line flag rather than the global replay state: live ANTsdr lines
@@ -1505,7 +1524,7 @@ def _kill_port_holders(port: str):
 
 def _serial_loop():
     """Open serial port and read lines from ANTsdr."""
-    if not _SERIAL_OK:
+    if _serial is None:
         raise RuntimeError("pyserial not installed — run: pip install pyserial")
     port = antsdr_config["serial_port"]
     baud = antsdr_config["serial_baud"]
@@ -1586,7 +1605,6 @@ def stale_cleaner():
 
 def gpsd_poller(host: str, port: int):
     """Stream TPV/SKY messages from gpsd like cgps — broadcast every update."""
-    global sensor_position
     last_fix_wall_time: float = 0.0
     print(f"[GPSD] Connecting to {host}:{port}")
     while True:
@@ -1674,6 +1692,28 @@ def gpsd_poller(host: str, port: int):
                 sock.close()
 
 
+_gpsd_addr: tuple = ("127.0.0.1", 2947)   # set from CLI args in __main__
+_gpsd_started = False
+_gpsd_start_lock = threading.Lock()
+
+
+def _ensure_gpsd_poller():
+    """Start the gpsd poller thread once. Safe to call repeatedly — e.g. when the
+    UI switches the sensor source from manual to gpsd without a restart. The
+    poller itself only applies positions while the source is 'gpsd'."""
+    global _gpsd_started
+    with _gpsd_start_lock:
+        if _gpsd_started:
+            return
+        _gpsd_started = True
+    threading.Thread(
+        target=gpsd_poller,
+        kwargs={"host": _gpsd_addr[0], "port": _gpsd_addr[1]},
+        daemon=True,
+        name="gpsd-poller",
+    ).start()
+
+
 # --- WSGI handlers ---
 
 def handle_index(start_response):
@@ -1727,13 +1767,16 @@ def _sse_generator():
     yield f"data: {payload}\n\n".encode()
     payload = json.dumps({"type": "serial_status", "stats": serial_stats})
     yield f"data: {payload}\n\n".encode()
+    # Build the snapshot under the lock, but never yield while holding it —
+    # a slow client would otherwise stall detection processing.
     with data_lock:
+        initial = []
         if sensor_position:
-            payload = json.dumps({"type": "sensor", "position": sensor_position})
-            yield f"data: {payload}\n\n".encode()
+            initial.append(json.dumps({"type": "sensor", "position": sensor_position}))
         for drone in drone_data.values():
-            payload = json.dumps({"type": "update", "drone": drone})
-            yield f"data: {payload}\n\n".encode()
+            initial.append(json.dumps({"type": "update", "drone": drone}))
+    for payload in initial:
+        yield f"data: {payload}\n\n".encode()
 
     try:
         while True:
@@ -1802,7 +1845,7 @@ def handle_config_post(environ, start_response):
     try:
         length  = int(environ.get("CONTENT_LENGTH", 0))
         body    = json.loads(environ["wsgi.input"].read(length))
-        conn_type = str(body.get("connection_type", "network")).strip()
+        conn_type = str(body.get("connection_type", antsdr_config["connection_type"])).strip()
         # Accept legacy "tcp"/"udp" too — they all map to the unified network listener.
         if conn_type in ("tcp", "udp"):
             conn_type = "network"
@@ -1864,6 +1907,8 @@ def handle_config_post(environ, start_response):
             with data_lock:
                 sensor_position.update(pos)
             broadcast({"type": "sensor", "position": pos})
+        elif antsdr_config["sensor_location_source"] == "gpsd":
+            _ensure_gpsd_poller()
         antsdr_config["discord_webhook"] = str(body.get("discord_webhook", antsdr_config["discord_webhook"])).strip()
         antsdr_config["tak_enabled"]     = bool(body.get("tak_enabled",    antsdr_config["tak_enabled"]))
         antsdr_config["tak_protocol"]    = str(body.get("tak_protocol",    antsdr_config["tak_protocol"])).strip()
@@ -2187,16 +2232,23 @@ def _read_json_body(environ) -> dict:
     return body if isinstance(body, dict) else {}
 
 
+def _sdr() -> sdr_capture.SdrCaptureManager:
+    """The SDR manager; the router only calls /sdr/* handlers once it exists."""
+    if sdr_manager is None:
+        raise RuntimeError("SDR capture manager not initialised")
+    return sdr_manager
+
+
 def handle_sdr_config_get(start_response):
     return _json_response(start_response, {
-        "config": sdr_manager.config(),
+        "config": _sdr().config(),
         "limits": sdr_capture.LIMITS,
     })
 
 
 def handle_sdr_config_post(environ, start_response):
     try:
-        cfg = sdr_manager.update_config(_read_json_body(environ))
+        cfg = _sdr().update_config(_read_json_body(environ))
         antsdr_config["sdr"] = cfg
         save_config()
         return _json_response(start_response, {"ok": True, "config": cfg})
@@ -2209,7 +2261,7 @@ def handle_sdr_test(environ, start_response):
         freq = float(_read_json_body(environ).get("freq_mhz", 0))
     except (TypeError, ValueError):
         freq = 0.0
-    result = sdr_manager.test_capture(freq)
+    result = _sdr().test_capture(freq)
     return _json_response(start_response, result, "200 OK" if result.get("ok") else "400 Bad Request")
 
 
@@ -2217,7 +2269,7 @@ def handle_sdr_capture_download(environ, start_response):
     qs = parse_qs(environ.get("QUERY_STRING", "") or "")
     name = (qs.get("name") or [""])[0]
     part = (qs.get("part") or ["data"])[0]
-    path = sdr_manager.capture_path(name, part)
+    path = _sdr().capture_path(name, part)
     if path is None:
         return handle_not_found(start_response)
     size = path.stat().st_size
@@ -2243,7 +2295,7 @@ def handle_sdr_capture_download(environ, start_response):
 def handle_sdr_capture_delete(environ, start_response):
     try:
         name = str(_read_json_body(environ).get("name", ""))
-        if not sdr_manager.delete_capture(name):
+        if not _sdr().delete_capture(name):
             return _json_response(start_response, {"ok": False, "error": "not found"}, "404 Not Found")
         return _json_response(start_response, {"ok": True})
     except Exception as e:
@@ -2261,6 +2313,10 @@ def handle_tile(style, z, x, y, start_response):
     if style not in TILE_UPSTREAM:
         start_response("404 Not Found", [("Content-Type", "text/plain")])
         return [b"Unknown style"]
+    # z/x/y become path components of the cache file — only plain integers are
+    # allowed, so "..", "%2e%2e" etc. can't escape MAPS_DIR.
+    if not all(s.isascii() and s.isdigit() and len(s) <= 8 for s in (z, x, y)):
+        return handle_not_found(start_response)
     cache_path = MAPS_DIR / style / z / x / y
     if cache_path.exists():
         data = cache_path.read_bytes()
@@ -2640,13 +2696,9 @@ if __name__ == "__main__":
         name="antsdr-receiver",
     ).start()
 
+    _gpsd_addr = (args.gpsd_host, args.gpsd_port)
     if antsdr_config.get("sensor_location_source", "gpsd") != "manual":
-        threading.Thread(
-            target=gpsd_poller,
-            kwargs={"host": args.gpsd_host, "port": args.gpsd_port},
-            daemon=True,
-            name="gpsd-poller",
-        ).start()
+        _ensure_gpsd_poller()
     else:
         print("[GPSD] Skipping gpsd poller — manual location is configured.")
 
