@@ -8,32 +8,36 @@ VERSION = "0.2.0"
 import argparse
 import bisect
 import collections
+import glob
 import json
+import logging
 import math
 import os
 import queue
 import re
+import shutil
+import socket
 import subprocess
 import sys
+import threading
+import time
+import urllib.error
+import urllib.request
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+from urllib.parse import parse_qs
+from xml.sax.saxutils import escape as xml_escape
+
+from waitress import serve
+
+import sdr_capture
+
 try:
     import serial as _serial
     _SERIAL_OK = True
 except ImportError:
     _serial = None
     _SERIAL_OK = False
-import socket
-import threading
-import time
-from concurrent.futures import ThreadPoolExecutor
-from pathlib import Path
-from urllib.parse import parse_qs
-from xml.sax.saxutils import escape as xml_escape
-
-import sdr_capture
-
-import logging
-
-from waitress import serve
 
 # Suppress noisy Waitress socket errors from abrupt SSE client disconnects
 logging.getLogger("waitress").setLevel(logging.CRITICAL)
@@ -197,49 +201,62 @@ def _sanitize_ring_radii(raw) -> list:
     return out[:20]  # cap to keep the map sane
 
 
+# dd-config.json key -> (antsdr_config key, type). The single list of scalar
+# settings shared by load_config, save_config and GET /config. Settings that need
+# sanitizing (range_ring_radii_m, geofence_zones, sdr) are handled separately.
+CONFIG_FIELDS = {
+    "antsdr_host":            ("host",                   str),
+    "antsdr_port":            ("port",                   int),
+    "antsdr_tcp_port":        ("tcp_port",               int),
+    "connection_type":        ("connection_type",        str),
+    "serial_port":            ("serial_port",            str),
+    "serial_baud":            ("serial_baud",            int),
+    "map_style":              ("map_style",              str),
+    "auto_fit":               ("auto_fit",               bool),
+    "auto_track":             ("auto_track",             bool),
+    "show_lines":             ("show_lines",             bool),
+    "range_rings":            ("range_rings",            bool),
+    "range_ring_color":       ("range_ring_color",       str),
+    "range_ring_opacity":     ("range_ring_opacity",     float),
+    "show_trails":            ("show_trails",            bool),
+    "proximity_alerts":       ("proximity_alerts",       bool),
+    "proximity_distance_m":   ("proximity_distance_m",   int),
+    "proximity_discord":      ("proximity_discord",      bool),
+    "proximity_cooldown_s":   ("proximity_cooldown_s",   int),
+    "tts_enabled":            ("tts_enabled",            bool),
+    "tts_announce_new":       ("tts_announce_new",       bool),
+    "tts_announce_proximity": ("tts_announce_proximity", bool),
+    "tts_announce_zone":      ("tts_announce_zone",      bool),
+    "tts_voice":              ("tts_voice",              str),
+    "tts_rate":               ("tts_rate",               float),
+    "sensor_icon":            ("sensor_icon",            str),
+    "sensor_name":            ("sensor_name",            str),
+    "sensor_location_source": ("sensor_location_source", str),
+    "sensor_lat":             ("sensor_lat",             float),
+    "sensor_lon":             ("sensor_lon",             float),
+    "discord_webhook":        ("discord_webhook",        str),
+    "tak_enabled":            ("tak_enabled",            bool),
+    "tak_protocol":           ("tak_protocol",           str),
+    "tak_host":               ("tak_host",               str),
+    "tak_port":               ("tak_port",               int),
+}
+
+
+def _config_as_json() -> dict:
+    """Settings in dd-config.json / GET /config shape (everything except "sdr")."""
+    out = {json_key: antsdr_config[cfg_key] for json_key, (cfg_key, _) in CONFIG_FIELDS.items()}
+    out["range_ring_radii_m"] = antsdr_config["range_ring_radii_m"]
+    out["geofence_zones"] = antsdr_config["geofence_zones"]
+    return out
+
+
 def load_config():
     """Load persisted settings from dd-config.json (if it exists)."""
     if not CONFIG_FILE.exists():
         return
     try:
         saved = json.loads(CONFIG_FILE.read_text())
-        mapping = {
-            "antsdr_host":      ("host",             str),
-            "antsdr_port":      ("port",             int),
-            "antsdr_tcp_port":  ("tcp_port",         int),
-            "connection_type":  ("connection_type",  str),
-            "serial_port":      ("serial_port",      str),
-            "serial_baud":      ("serial_baud",      int),
-            "map_style":        ("map_style",         str),
-            "auto_fit":         ("auto_fit",          bool),
-            "auto_track":       ("auto_track",        bool),
-            "show_lines":       ("show_lines",        bool),
-            "range_rings":      ("range_rings",       bool),
-            "range_ring_color":   ("range_ring_color",   str),
-            "range_ring_opacity": ("range_ring_opacity", float),
-            "show_trails":      ("show_trails",       bool),
-            "proximity_alerts":     ("proximity_alerts",     bool),
-            "proximity_distance_m": ("proximity_distance_m", int),
-            "proximity_discord":    ("proximity_discord",    bool),
-            "proximity_cooldown_s": ("proximity_cooldown_s", int),
-            "tts_enabled":            ("tts_enabled",            bool),
-            "tts_announce_new":       ("tts_announce_new",       bool),
-            "tts_announce_proximity": ("tts_announce_proximity", bool),
-            "tts_announce_zone":      ("tts_announce_zone",      bool),
-            "tts_voice":              ("tts_voice",              str),
-            "tts_rate":               ("tts_rate",               float),
-            "sensor_icon":             ("sensor_icon",            str),
-            "sensor_name":             ("sensor_name",            str),
-            "sensor_location_source":  ("sensor_location_source", str),
-            "sensor_lat":              ("sensor_lat",              float),
-            "sensor_lon":              ("sensor_lon",              float),
-            "discord_webhook":  ("discord_webhook",   str),
-            "tak_enabled":      ("tak_enabled",       bool),
-            "tak_protocol":     ("tak_protocol",      str),
-            "tak_host":         ("tak_host",          str),
-            "tak_port":         ("tak_port",          int),
-        }
-        for json_key, (cfg_key, cast) in mapping.items():
+        for json_key, (cfg_key, cast) in CONFIG_FIELDS.items():
             if json_key in saved:
                 antsdr_config[cfg_key] = cast(saved[json_key])
         if isinstance(saved.get("geofence_zones"), list):
@@ -258,45 +275,7 @@ def load_config():
 
 def save_config():
     """Persist current settings to dd-config.json. Raises on failure."""
-    CONFIG_FILE.write_text(json.dumps({
-        "antsdr_host":     antsdr_config["host"],
-        "antsdr_port":     antsdr_config["port"],
-        "antsdr_tcp_port": antsdr_config["tcp_port"],
-        "connection_type": antsdr_config["connection_type"],
-        "serial_port":     antsdr_config["serial_port"],
-        "serial_baud":     antsdr_config["serial_baud"],
-        "map_style":       antsdr_config["map_style"],
-        "auto_fit":        antsdr_config["auto_fit"],
-        "auto_track":      antsdr_config["auto_track"],
-        "show_lines":      antsdr_config["show_lines"],
-        "range_rings":     antsdr_config["range_rings"],
-        "range_ring_color":   antsdr_config["range_ring_color"],
-        "range_ring_opacity": antsdr_config["range_ring_opacity"],
-        "range_ring_radii_m": antsdr_config["range_ring_radii_m"],
-        "show_trails":     antsdr_config["show_trails"],
-        "proximity_alerts":     antsdr_config["proximity_alerts"],
-        "proximity_distance_m": antsdr_config["proximity_distance_m"],
-        "proximity_discord":    antsdr_config["proximity_discord"],
-        "proximity_cooldown_s": antsdr_config["proximity_cooldown_s"],
-        "tts_enabled":            antsdr_config["tts_enabled"],
-        "tts_announce_new":       antsdr_config["tts_announce_new"],
-        "tts_announce_proximity": antsdr_config["tts_announce_proximity"],
-        "tts_announce_zone":      antsdr_config["tts_announce_zone"],
-        "tts_voice":              antsdr_config["tts_voice"],
-        "tts_rate":               antsdr_config["tts_rate"],
-        "sensor_icon":            antsdr_config["sensor_icon"],
-        "sensor_name":            antsdr_config["sensor_name"],
-        "sensor_location_source": antsdr_config["sensor_location_source"],
-        "sensor_lat":             antsdr_config["sensor_lat"],
-        "sensor_lon":             antsdr_config["sensor_lon"],
-        "discord_webhook": antsdr_config["discord_webhook"],
-        "tak_enabled":     antsdr_config["tak_enabled"],
-        "tak_protocol":    antsdr_config["tak_protocol"],
-        "tak_host":        antsdr_config["tak_host"],
-        "tak_port":        antsdr_config["tak_port"],
-        "geofence_zones":  antsdr_config["geofence_zones"],
-        "sdr":             antsdr_config["sdr"],
-    }, indent=2))
+    CONFIG_FILE.write_text(json.dumps({**_config_as_json(), "sdr": antsdr_config["sdr"]}, indent=2))
 
 
 def load_history():
@@ -343,37 +322,45 @@ _error_discord_last_sent: float = 0.0
 ERROR_DISCORD_INTERVAL = 15 * 60  # 15 minutes
 
 
-def _send_discord_error(source: str, message: str):
-    """POST an error embed to the configured Discord webhook."""
+def _sensor_name() -> str:
+    return antsdr_config.get("sensor_name", "Sensor").strip() or "Sensor"
+
+
+def _post_discord(label: str, build_embed, *args):
+    """POST the embed returned by build_embed(*args) to the configured Discord webhook.
+
+    Adds the common footer and timestamp. Never raises: failures are logged with
+    `label`, since this runs on the I/O executor where exceptions would vanish.
+    """
     webhook = antsdr_config.get("discord_webhook", "").strip()
     if not webhook:
         return
     try:
-        import urllib.request
-        import urllib.error
-
-        embed = {
-            "title":     f"⚠ Error [{source}]",
-            "description": message,
-            "color":     0xda3633,
-            "footer":    {"text": f"DJI Drone Detection — {antsdr_config.get('sensor_name', 'Sensor').strip() or 'Sensor'}"},
-            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        }
-        payload = json.dumps({"embeds": [embed]}).encode()
+        embed = build_embed(*args)
+        embed["footer"] = {"text": f"DJI Drone Detection — {_sensor_name()}"}
+        embed["timestamp"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         req = urllib.request.Request(
             webhook,
-            data=payload,
+            data=json.dumps({"embeds": [embed]}).encode(),
             headers={"Content-Type": "application/json", "User-Agent": "DJIDetect/1.0"},
             method="POST",
         )
         try:
             with urllib.request.urlopen(req, timeout=5):
-                pass
+                pass  # 204 No Content on success
         except urllib.error.HTTPError as e:
             body = e.read().decode("utf-8", errors="replace")
-            print(f"[Discord] Error alert HTTP {e.code}: {body}")
+            print(f"[Discord] {label} HTTP {e.code}: {body}")
     except Exception as e:
-        print(f"[Discord] Error alert failed: {e}")
+        print(f"[Discord] {label} failed: {e}")
+
+
+def _error_embed(source: str, message: str) -> dict:
+    return {"title": f"⚠ Error [{source}]", "description": message, "color": 0xda3633}
+
+
+def _send_discord_error(source: str, message: str):
+    _post_discord("Error alert", _error_embed, source, message)
 
 
 def broadcast_error(source: str, message: str):
@@ -429,7 +416,7 @@ def _parse_antsdr_line(line: str) -> dict | None:
 
         alt_parts    = fields[12].split("|")
         # firmware's altitude field is scaled down by 10 — multiply by 10 for metres
-        # (same conversion as the upstream dji_receiver.py)
+        # (same conversion as cemaxecuter's dji_receiver.py)
         geodetic_alt = flt(alt_parts[0]) * 10.0
         height_agl   = flt(alt_parts[1]) if len(alt_parts) > 1 else 0.0
 
@@ -519,77 +506,57 @@ def _map_url(drone: dict) -> str:
     return f"https://maps.google.com/?q={dlat:.6f},{dlon:.6f}"
 
 
+def _drone_id_fields(drone: dict) -> list:
+    return [
+        {"name": "Serial", "value": drone.get("serial_number", "—"), "inline": True},
+        {"name": "Model",  "value": drone.get("device_type",   "—"), "inline": True},
+    ]
+
+
+def _altitude_field(drone: dict) -> dict:
+    return {"name": "Altitude",
+            "value": f"{drone.get('geodetic_altitude', 0):.1f} m MSL"
+                     f" / {drone.get('height_agl', 0):.1f} m AGL",
+            "inline": True}
+
+
+def _detection_embed(drone: dict) -> dict:
+    dlat, dlon = drone.get("drone_lat", 0), drone.get("drone_lon", 0)
+    plat, plon = drone.get("pilot_lat", 0), drone.get("pilot_lon", 0)
+    hlat, hlon = drone.get("home_lat", 0), drone.get("home_lon", 0)
+    fields = _drone_id_fields(drone) + [
+        {"name": "\u200b", "value": "\u200b",                  "inline": True},
+        {"name": "Drone",  "value": f"{dlat:.6f}, {dlon:.6f}", "inline": True},
+    ]
+    if plat or plon:
+        fields.append({"name": "Pilot", "value": f"{plat:.6f}, {plon:.6f}", "inline": True})
+    if hlat or hlon:
+        fields.append({"name": "Home",  "value": f"{hlat:.6f}, {hlon:.6f}", "inline": True})
+    fields += [
+        _altitude_field(drone),
+        {"name": "Speed",
+         "value": f"{drone.get('horizontal_speed', 0):.1f} m/s H"
+                  f"  {drone.get('vertical_speed', 0):.1f} m/s V",
+         "inline": True},
+        {"name": "RSSI / Freq",
+         "value": f"{drone.get('rssi', 0)} dBm / {drone.get('freq', 0):.1f} MHz",
+         "inline": True},
+    ]
+    return {
+        "title":       f"\U0001f6f8 Drone Detected: {drone.get('device_type', 'Unknown')}",
+        "description": f"[View on map \U0001f5fa]({_map_url(drone)})",
+        "color":       0xf0883e,
+        "fields":      fields,
+    }
+
+
 def _send_discord_alert(drone: dict):
-    """POST a detection embed to the configured Discord webhook (non-blocking)."""
-    webhook = antsdr_config.get("discord_webhook", "").strip()
-    if not webhook:
-        return
-    try:
-        import urllib.request
-        import urllib.error
-
-        dlat  = drone.get("drone_lat", 0)
-        dlon  = drone.get("drone_lon", 0)
-        plat  = drone.get("pilot_lat", 0)
-        plon  = drone.get("pilot_lon", 0)
-        hlat  = drone.get("home_lat",  0)
-        hlon  = drone.get("home_lon",  0)
-
-        fields = [
-            {"name": "Serial",   "value": drone.get("serial_number", "—"), "inline": True},
-            {"name": "Model",    "value": drone.get("device_type",   "—"), "inline": True},
-            {"name": "\u200b",   "value": "\u200b",                         "inline": True},
-            {"name": "Drone",    "value": f"{dlat:.6f}, {dlon:.6f}",        "inline": True},
-        ]
-        if plat or plon:
-            fields.append({"name": "Pilot", "value": f"{plat:.6f}, {plon:.6f}", "inline": True})
-        if hlat or hlon:
-            fields.append({"name": "Home",  "value": f"{hlat:.6f}, {hlon:.6f}", "inline": True})
-        fields += [
-            {"name": "Altitude",
-             "value": f"{drone.get('geodetic_altitude', 0):.1f} m MSL"
-                      f" / {drone.get('height_agl', 0):.1f} m AGL",
-             "inline": True},
-            {"name": "Speed",
-             "value": f"{drone.get('horizontal_speed', 0):.1f} m/s H"
-                      f"  {drone.get('vertical_speed', 0):.1f} m/s V",
-             "inline": True},
-            {"name": "RSSI / Freq",
-             "value": f"{drone.get('rssi', 0)} dBm"
-                      f" / {drone.get('freq', 0):.1f} MHz",
-             "inline": True},
-        ]
-
-        embed = {
-            "title":       f"\U0001f6f8 Drone Detected: {drone.get('device_type', 'Unknown')}",
-            "description": f"[View on map \U0001f5fa]({_map_url(drone)})",
-            "color":       0xf0883e,
-            "fields":      fields,
-            "footer":      {"text": f"DJI Drone Detection — {antsdr_config.get('sensor_name', 'Sensor').strip() or 'Sensor'}"},
-            "timestamp":   time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        }
-
-        payload = json.dumps({"embeds": [embed]}).encode()
-        req = urllib.request.Request(
-            webhook,
-            data=payload,
-            headers={
-                "Content-Type": "application/json",
-                "User-Agent": "DJIDetect/1.0",
-            },
-            method="POST",
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=5):
-                pass  # 204 No Content on success
-        except urllib.error.HTTPError as e:
-            body = e.read().decode("utf-8", errors="replace")
-            print(f"[Discord] HTTP {e.code}: {body}")
-    except Exception as e:
-        print(f"[Discord] Alert failed: {e}")
+    """POST a detection embed to the configured Discord webhook."""
+    _post_discord("Alert", _detection_embed, drone)
 
 
 DISCORD_ALERT_INTERVAL = 30   # seconds between repeated Discord alerts per drone
+_discord_last_sent: dict = {}  # serial -> last alert wall time
 
 # Per-serial latch: True while drone is currently inside the proximity radius.
 # Resets when the drone leaves the radius (or goes stale) so re-entries fire again.
@@ -644,116 +611,55 @@ def _compass_point(deg: float) -> str:
     return dirs[round(deg / 22.5) % 16]
 
 
+def _proximity_embed(drone: dict, distance_m: float, bearing: float) -> dict:
+    threshold = antsdr_config.get("proximity_distance_m", 1000)
+    dist_str = f"{distance_m/1000:.2f} km" if distance_m >= 1000 else f"{int(round(distance_m))} m"
+    fields = _drone_id_fields(drone) + [
+        {"name": "Distance", "value": f"{dist_str} (≤ {threshold} m)", "inline": True},
+        {"name": "Bearing",  "value": f"{int(round(bearing))}° {_compass_point(bearing)}", "inline": True},
+        {"name": "Drone",    "value": f"{drone.get('drone_lat', 0):.6f}, {drone.get('drone_lon', 0):.6f}",
+         "inline": True},
+        _altitude_field(drone),
+    ]
+    return {
+        "title":       f"\u26a0\ufe0f Proximity Alert: {drone.get('device_type', 'Unknown')}",
+        "description": f"Drone entered the {threshold} m alert radius.\n[View on map \U0001f5fa]({_map_url(drone)})",
+        "color":       0xda3633,
+        "fields":      fields,
+    }
+
+
 def _send_discord_proximity_alert(drone: dict, distance_m: float, bearing: float):
     """POST a proximity-alert embed to the configured Discord webhook."""
-    webhook = antsdr_config.get("discord_webhook", "").strip()
-    if not webhook:
-        return
+    _post_discord("Proximity alert", _proximity_embed, drone, distance_m, bearing)
+
+
+def _zone_embed(drone: dict, zone: dict) -> dict:
+    fields = _drone_id_fields(drone) + [
+        {"name": "Zone",  "value": zone.get("name", "Zone"), "inline": True},
+        {"name": "Drone", "value": f"{drone.get('drone_lat', 0):.6f}, {drone.get('drone_lon', 0):.6f}",
+         "inline": True},
+        _altitude_field(drone),
+        {"name": "Speed", "value": f"{drone.get('horizontal_speed', 0):.1f} m/s", "inline": True},
+    ]
+    # Zone color hex like "#f85149" → int 0xf85149 for embed.
     try:
-        import urllib.request
-        import urllib.error
-
-        dlat = drone.get("drone_lat", 0)
-        dlon = drone.get("drone_lon", 0)
-        threshold = antsdr_config.get("proximity_distance_m", 1000)
-        dist_str = f"{distance_m/1000:.2f} km" if distance_m >= 1000 else f"{int(round(distance_m))} m"
-
-        fields = [
-            {"name": "Serial",   "value": drone.get("serial_number", "—"), "inline": True},
-            {"name": "Model",    "value": drone.get("device_type",   "—"), "inline": True},
-            {"name": "Distance", "value": f"{dist_str} (≤ {threshold} m)", "inline": True},
-            {"name": "Bearing",  "value": f"{int(round(bearing))}° {_compass_point(bearing)}", "inline": True},
-            {"name": "Drone",    "value": f"{dlat:.6f}, {dlon:.6f}",       "inline": True},
-            {"name": "Altitude",
-             "value": f"{drone.get('geodetic_altitude', 0):.1f} m MSL"
-                      f" / {drone.get('height_agl', 0):.1f} m AGL",
-             "inline": True},
-        ]
-
-        embed = {
-            "title":       f"\u26a0\ufe0f Proximity Alert: {drone.get('device_type', 'Unknown')}",
-            "description": f"Drone entered the {threshold} m alert radius.\n[View on map \U0001f5fa]({_map_url(drone)})",
-            "color":       0xda3633,
-            "fields":      fields,
-            "footer":      {"text": f"DJI Drone Detection — {antsdr_config.get('sensor_name', 'Sensor').strip() or 'Sensor'}"},
-            "timestamp":   time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        }
-
-        payload = json.dumps({"embeds": [embed]}).encode()
-        req = urllib.request.Request(
-            webhook,
-            data=payload,
-            headers={
-                "Content-Type": "application/json",
-                "User-Agent": "DJIDetect/1.0",
-            },
-            method="POST",
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=5):
-                pass
-        except urllib.error.HTTPError as e:
-            body = e.read().decode("utf-8", errors="replace")
-            print(f"[Discord] Proximity HTTP {e.code}: {body}")
-    except Exception as e:
-        print(f"[Discord] Proximity alert failed: {e}")
+        color_int = int((zone.get("color") or "#f85149").lstrip("#"), 16)
+    except ValueError:
+        color_int = 0xf85149
+    return {
+        "title":       f"\u26a0\ufe0f Geofence Alert: {zone.get('name', 'Zone')}",
+        "description": f"Drone entered geofence zone.\n[View on map \U0001f5fa]({_map_url(drone)})",
+        "color":       color_int,
+        "fields":      fields,
+    }
 
 
 def _send_discord_zone_alert(drone: dict, zone: dict):
     """POST a geofence zone-entry embed to the configured Discord webhook."""
-    webhook = antsdr_config.get("discord_webhook", "").strip()
-    if not webhook:
-        return
-    try:
-        import urllib.request
-        import urllib.error
+    _post_discord("Zone alert", _zone_embed, drone, zone)
 
-        dlat = drone.get("drone_lat", 0)
-        dlon = drone.get("drone_lon", 0)
 
-        fields = [
-            {"name": "Serial", "value": drone.get("serial_number", "—"), "inline": True},
-            {"name": "Model",  "value": drone.get("device_type",   "—"), "inline": True},
-            {"name": "Zone",   "value": zone.get("name", "Zone"),         "inline": True},
-            {"name": "Drone",  "value": f"{dlat:.6f}, {dlon:.6f}",        "inline": True},
-            {"name": "Altitude",
-             "value": f"{drone.get('geodetic_altitude', 0):.1f} m MSL"
-                      f" / {drone.get('height_agl', 0):.1f} m AGL",
-             "inline": True},
-            {"name": "Speed",  "value": f"{drone.get('horizontal_speed', 0):.1f} m/s", "inline": True},
-        ]
-
-        # Zone color hex like "#f85149" → int 0xf85149 for embed.
-        try:
-            color_int = int((zone.get("color") or "#f85149").lstrip("#"), 16)
-        except ValueError:
-            color_int = 0xf85149
-
-        embed = {
-            "title":       f"\u26a0\ufe0f Geofence Alert: {zone.get('name', 'Zone')}",
-            "description": f"Drone entered geofence zone.\n[View on map \U0001f5fa]({_map_url(drone)})",
-            "color":       color_int,
-            "fields":      fields,
-            "footer":      {"text": f"DJI Drone Detection — {antsdr_config.get('sensor_name', 'Sensor').strip() or 'Sensor'}"},
-            "timestamp":   time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        }
-
-        payload = json.dumps({"embeds": [embed]}).encode()
-        req = urllib.request.Request(
-            webhook,
-            data=payload,
-            headers={"Content-Type": "application/json", "User-Agent": "DJIDetect/1.0"},
-            method="POST",
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=5):
-                pass
-        except urllib.error.HTTPError as e:
-            body = e.read().decode("utf-8", errors="replace")
-            print(f"[Discord] Zone HTTP {e.code}: {body}")
-    except Exception as e:
-        print(f"[Discord] Zone alert failed: {e}")
-_discord_last_sent: dict = {} # serial -> last alert wall time
 
 
 # --- TAK CoT sender ---
@@ -797,14 +703,42 @@ def _build_cot_event(uid: str, cot_type: str, lat: float, lon: float, hae: float
     return xml.encode()
 
 
+def _tak_target():
+    """(host, port, protocol) when TAK output is enabled and has a host, else None."""
+    if not antsdr_config.get("tak_enabled"):
+        return None
+    host = antsdr_config.get("tak_host", "").strip()
+    port = int(antsdr_config.get("tak_port", 8087))
+    if not host:
+        return None
+    return host, port, antsdr_config.get("tak_protocol", "udp")
+
+
+def _tak_send(events: list, target: tuple):
+    """Send CoT events over UDP, or over one short-lived TCP connection."""
+    host, port, proto = target
+    if proto == "udp":
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            for ev in events:
+                sock.sendto(ev, (host, port))
+        finally:
+            sock.close()
+    else:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(5)
+        try:
+            sock.connect((host, port))
+            for ev in events:
+                sock.sendall(ev)
+        finally:
+            sock.close()
+
+
 def _send_tak(drone: dict):
     """Send CoT events for drone, pilot, and home to the TAK server."""
-    if not antsdr_config.get("tak_enabled"):
-        return
-    host  = antsdr_config.get("tak_host", "").strip()
-    port  = int(antsdr_config.get("tak_port", 8087))
-    proto = antsdr_config.get("tak_protocol", "udp")
-    if not host:
+    target = _tak_target()
+    if not target:
         return
 
     try:
@@ -850,26 +784,8 @@ def _send_tak(drone: dict):
                 callsign=f"Home-{tag}",
                 remarks=f"Home point of {model} ({serial})",
             ))
-        if not events:
-            return
-
-        if proto == "udp":
-            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            try:
-                for ev in events:
-                    sock.sendto(ev, (host, port))
-            finally:
-                sock.close()
-        else:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(5)
-            try:
-                sock.connect((host, port))
-                for ev in events:
-                    sock.sendall(ev)
-            finally:
-                sock.close()
-
+        if events:
+            _tak_send(events, target)
     except Exception as e:
         print(f"[TAK] Send failed: {e}")
         broadcast_error("TAK", f"Send failed: {e}")
@@ -879,14 +795,10 @@ TAK_SENSOR_INTERVAL = 30  # seconds between sensor position beacons to TAK
 
 def _send_tak_sensor():
     """Send the sensor's current GPS position as a CoT event to the TAK server."""
-    if not antsdr_config.get("tak_enabled"):
+    target = _tak_target()
+    if not target:
         return
-    host  = antsdr_config.get("tak_host", "").strip()
-    port  = int(antsdr_config.get("tak_port", 8087))
-    proto = antsdr_config.get("tak_protocol", "udp")
-    name  = antsdr_config.get("sensor_name", "Sensor").strip() or "Sensor"
-    if not host:
-        return
+    name = _sensor_name()
     with data_lock:
         pos = sensor_position.copy()
     if not pos.get("lat") or not pos.get("lon"):
@@ -901,20 +813,7 @@ def _send_tak_sensor():
             remarks=f"DJI Detect sensor — {name}",
             stale_secs=90,
         )
-        if proto == "udp":
-            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            try:
-                sock.sendto(event, (host, port))
-            finally:
-                sock.close()
-        else:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(5)
-            try:
-                sock.connect((host, port))
-                sock.sendall(event)
-            finally:
-                sock.close()
+        _tak_send([event], target)
     except Exception as e:
         print(f"[TAK] Sensor beacon failed: {e}")
         broadcast_error("TAK", f"Sensor beacon failed: {e}")
@@ -925,6 +824,26 @@ def _tak_sensor_beacon():
     while True:
         time.sleep(TAK_SENSOR_INTERVAL)
         _send_tak_sensor()
+
+
+def _fixed_position(lat: float, lon: float, alt: float | None = None) -> dict:
+    """A sensor_position entry for a non-gpsd source (manual setting or a replayed recording)."""
+    return {"mode": 3 if alt is not None else 2, "lat": lat, "lon": lon, "alt": alt,
+            "sats_used": 0, "sats_visible": 0, "gps_time": None,
+            "last_fix_wall_time": time.time()}
+
+
+def _recorded_sensor_position(sensor) -> dict | None:
+    """Position from a recording's per-line "sensor" entry, or None if it has no lat/lon."""
+    if not isinstance(sensor, dict) or sensor.get("lat") is None or sensor.get("lon") is None:
+        return None
+    return _fixed_position(sensor["lat"], sensor["lon"], sensor.get("alt"))
+
+
+def _apply_sensor_position(pos: dict):
+    with data_lock:
+        sensor_position.update(pos)
+    broadcast({"type": "sensor", "position": pos})
 
 
 def _manual_location_broadcaster():
@@ -1072,23 +991,10 @@ def _replay_thread(path: Path, speed: float):
                 for j in range(target_idx + 1):
                     if isinstance(entries[j][2], dict):
                         latest_sensor = entries[j][2]
-                if isinstance(latest_sensor, dict):
-                    slat = latest_sensor.get("lat"); slon = latest_sensor.get("lon")
-                    if slat is not None and slon is not None:
-                        pos = {
-                            "mode": 3 if latest_sensor.get("alt") is not None else 2,
-                            "lat":  slat,
-                            "lon":  slon,
-                            "alt":  latest_sensor.get("alt"),
-                            "sats_used":          0,
-                            "sats_visible":       0,
-                            "gps_time":           None,
-                            "last_fix_wall_time": time.time(),
-                        }
-                        last_replayed_sensor = (slat, slon, pos["alt"])
-                        with data_lock:
-                            sensor_position.update(pos)
-                        broadcast({"type": "sensor", "position": pos})
+                pos = _recorded_sensor_position(latest_sensor)
+                if pos:
+                    last_replayed_sensor = (pos["lat"], pos["lon"], pos["alt"])
+                    _apply_sensor_position(pos)
                 i = target_idx
                 prev_t = entries[i][0]
                 sent = i
@@ -1112,25 +1018,12 @@ def _replay_thread(path: Path, speed: float):
                 if _replay_state.get("seek_to") is not None:
                     continue
             # Apply recorded sensor position, only broadcasting when it changes.
-            if isinstance(sensor, dict):
-                slat = sensor.get("lat"); slon = sensor.get("lon")
-                if slat is not None and slon is not None:
-                    pos = {
-                        "mode": 3 if sensor.get("alt") is not None else 2,
-                        "lat":  slat,
-                        "lon":  slon,
-                        "alt":  sensor.get("alt"),
-                        "sats_used":          0,
-                        "sats_visible":       0,
-                        "gps_time":           None,
-                        "last_fix_wall_time": time.time(),
-                    }
-                    key = (slat, slon, pos["alt"])
-                    if key != last_replayed_sensor:
-                        last_replayed_sensor = key
-                        with data_lock:
-                            sensor_position.update(pos)
-                        broadcast({"type": "sensor", "position": pos})
+            pos = _recorded_sensor_position(sensor)
+            if pos:
+                key = (pos["lat"], pos["lon"], pos["alt"])
+                if key != last_replayed_sensor:
+                    last_replayed_sensor = key
+                    _apply_sensor_position(pos)
             _process_line(line + "\n", replayed=True)
             i += 1
             sent = i
@@ -1679,9 +1572,7 @@ def gpsd_poller(host: str, port: int):
 
                 if antsdr_config.get("sensor_location_source", "gpsd") == "gpsd" \
                         and not _replay_state.get("active"):
-                    with data_lock:
-                        sensor_position.update(pos)
-                    broadcast({"type": "sensor", "position": pos})
+                    _apply_sensor_position(pos)
 
         except Exception as e:
             print(f"[GPSD] Error: {e} — retrying in 10s")
@@ -1716,8 +1607,15 @@ def _ensure_gpsd_poller():
 
 # --- WSGI handlers ---
 
+def _json_response(start_response, payload, status="200 OK"):
+    body = json.dumps(payload).encode()
+    start_response(status, [("Content-Type", "application/json"),
+                            ("Content-Length", str(len(body)))])
+    return [body]
+
+
 def handle_index(start_response):
-    name = antsdr_config.get("sensor_name", "Sensor").strip() or "Sensor"
+    name = _sensor_name()
     html = (TEMPLATE_DIR / "index.html").read_text(encoding="utf-8") \
                .replace("<title>Sensor</title>", f"<title>{name} - DJI Drone Detector</title>") \
                .encode("utf-8")
@@ -1730,22 +1628,14 @@ def handle_index(start_response):
 
 def handle_drones(start_response):
     with data_lock:
-        body = json.dumps(list(drone_data.values())).encode()
-    start_response("200 OK", [
-        ("Content-Type", "application/json"),
-        ("Content-Length", str(len(body))),
-    ])
-    return [body]
+        drones = list(drone_data.values())
+    return _json_response(start_response, drones)
 
 
 def handle_sensor(start_response):
     with data_lock:
-        body = json.dumps(sensor_position).encode()
-    start_response("200 OK", [
-        ("Content-Type", "application/json"),
-        ("Content-Length", str(len(body))),
-    ])
-    return [body]
+        pos = dict(sensor_position)
+    return _json_response(start_response, pos)
 
 
 def handle_stream(start_response):
@@ -1794,51 +1684,7 @@ def _sse_generator():
 
 
 def handle_config_get(start_response):
-    with data_lock:
-        body = json.dumps({
-            "version":         VERSION,
-            "antsdr_host":     antsdr_config["host"],
-            "antsdr_port":     antsdr_config["port"],
-            "antsdr_tcp_port": antsdr_config["tcp_port"],
-            "connection_type": antsdr_config["connection_type"],
-            "serial_port":     antsdr_config["serial_port"],
-            "serial_baud":     antsdr_config["serial_baud"],
-            "map_style":       antsdr_config["map_style"],
-            "auto_fit":        antsdr_config["auto_fit"],
-            "auto_track":      antsdr_config["auto_track"],
-            "show_lines":      antsdr_config["show_lines"],
-            "range_rings":     antsdr_config["range_rings"],
-            "range_ring_color":   antsdr_config["range_ring_color"],
-            "range_ring_opacity": antsdr_config["range_ring_opacity"],
-            "range_ring_radii_m": antsdr_config["range_ring_radii_m"],
-            "show_trails":     antsdr_config["show_trails"],
-            "proximity_alerts":     antsdr_config["proximity_alerts"],
-            "proximity_distance_m": antsdr_config["proximity_distance_m"],
-            "proximity_discord":    antsdr_config["proximity_discord"],
-            "proximity_cooldown_s": antsdr_config["proximity_cooldown_s"],
-            "tts_enabled":            antsdr_config["tts_enabled"],
-            "tts_announce_new":       antsdr_config["tts_announce_new"],
-            "tts_announce_proximity": antsdr_config["tts_announce_proximity"],
-            "tts_announce_zone":      antsdr_config["tts_announce_zone"],
-            "tts_voice":              antsdr_config["tts_voice"],
-            "tts_rate":               antsdr_config["tts_rate"],
-            "sensor_icon":            antsdr_config["sensor_icon"],
-            "sensor_name":            antsdr_config["sensor_name"],
-            "sensor_location_source": antsdr_config["sensor_location_source"],
-            "sensor_lat":             antsdr_config["sensor_lat"],
-            "sensor_lon":             antsdr_config["sensor_lon"],
-            "discord_webhook": antsdr_config["discord_webhook"],
-            "tak_enabled":     antsdr_config["tak_enabled"],
-            "tak_protocol":    antsdr_config["tak_protocol"],
-            "tak_host":        antsdr_config["tak_host"],
-            "tak_port":        antsdr_config["tak_port"],
-            "geofence_zones":  antsdr_config["geofence_zones"],
-        }).encode()
-    start_response("200 OK", [
-        ("Content-Type", "application/json"),
-        ("Content-Length", str(len(body))),
-    ])
-    return [body]
+    return _json_response(start_response, {"version": VERSION, **_config_as_json()})
 
 
 def handle_config_post(environ, start_response):
@@ -1899,14 +1745,7 @@ def handle_config_post(environ, start_response):
         antsdr_config["sensor_lon"]             = float(body.get("sensor_lon",           antsdr_config["sensor_lon"]))
         # Apply manual position immediately
         if antsdr_config["sensor_location_source"] == "manual":
-            slat = antsdr_config["sensor_lat"]
-            slon = antsdr_config["sensor_lon"]
-            pos = {"mode": 2, "lat": slat, "lon": slon, "alt": None,
-                   "sats_used": 0, "sats_visible": 0, "gps_time": None,
-                   "last_fix_wall_time": time.time()}
-            with data_lock:
-                sensor_position.update(pos)
-            broadcast({"type": "sensor", "position": pos})
+            _apply_sensor_position(_fixed_position(antsdr_config["sensor_lat"], antsdr_config["sensor_lon"]))
         elif antsdr_config["sensor_location_source"] == "gpsd":
             _ensure_gpsd_poller()
         antsdr_config["discord_webhook"] = str(body.get("discord_webhook", antsdr_config["discord_webhook"])).strip()
@@ -1920,21 +1759,13 @@ def handle_config_post(environ, start_response):
         if body.get("reconnect", True):
             antsdr_reconnect.set()
 
-        resp = json.dumps({"ok": True}).encode()
-        start_response("200 OK", [("Content-Type", "application/json"), ("Content-Length", str(len(resp)))])
-        return [resp]
+        return _json_response(start_response, {"ok": True})
     except Exception as e:
-        resp = json.dumps({"ok": False, "error": str(e)}).encode()
-        start_response("400 Bad Request", [("Content-Type", "application/json"), ("Content-Length", str(len(resp)))])
-        return [resp]
+        return _json_response(start_response, {"ok": False, "error": str(e)}, "400 Bad Request")
 
 
 def handle_zones_get(start_response):
-    with data_lock:
-        body = json.dumps({"zones": antsdr_config["geofence_zones"]}).encode()
-    start_response("200 OK", [("Content-Type", "application/json"),
-                               ("Content-Length", str(len(body)))])
-    return [body]
+    return _json_response(start_response, {"zones": antsdr_config["geofence_zones"]})
 
 
 def handle_zones_post(environ, start_response):
@@ -1944,15 +1775,9 @@ def handle_zones_post(environ, start_response):
         zones  = _sanitize_zones(body.get("zones") if isinstance(body, dict) else body)
         antsdr_config["geofence_zones"] = zones
         save_config()
-        resp = json.dumps({"ok": True, "count": len(zones)}).encode()
-        start_response("200 OK", [("Content-Type", "application/json"),
-                                   ("Content-Length", str(len(resp)))])
-        return [resp]
+        return _json_response(start_response, {"ok": True, "count": len(zones)})
     except Exception as e:
-        resp = json.dumps({"ok": False, "error": str(e)}).encode()
-        start_response("400 Bad Request", [("Content-Type", "application/json"),
-                                            ("Content-Length", str(len(resp)))])
-        return [resp]
+        return _json_response(start_response, {"ok": False, "error": str(e)}, "400 Bad Request")
 
 
 def handle_serial_ports(start_response):
@@ -1967,7 +1792,6 @@ def handle_serial_ports(start_response):
             for p in list_ports.comports():
                 seen[p.device] = {"port": p.device, "desc": p.description or p.device}
             # Fallback: glob common Linux/macOS device paths missed by comports()
-            import glob
             for pattern in ("/dev/ttyUSB*", "/dev/ttyACM*", "/dev/ttyS[0-9]*",
                             "/dev/tty.usbserial*", "/dev/tty.usbmodem*"):
                 for dev in glob.glob(pattern):
@@ -1977,40 +1801,26 @@ def handle_serial_ports(start_response):
         except Exception as e:
             error = str(e)
             print(f"[Serial] Port scan error: {e}")
-    body = json.dumps({"ports": ports, "error": error}).encode()
-    start_response("200 OK", [
-        ("Content-Type", "application/json"),
-        ("Content-Length", str(len(body))),
-    ])
-    return [body]
+    return _json_response(start_response, {"ports": ports, "error": error})
 
 
 def handle_raw(start_response):
     with data_lock:
-        body = json.dumps(list(raw_lines)).encode()
-    start_response("200 OK", [
-        ("Content-Type", "application/json"),
-        ("Content-Length", str(len(body))),
-    ])
-    return [body]
+        lines = list(raw_lines)
+    return _json_response(start_response, lines)
 
 
 def handle_history(environ, start_response):
     method = environ.get("REQUEST_METHOD", "GET")
     if method == "GET":
         with data_lock:
-            body = json.dumps(drone_history).encode()
-        start_response("200 OK", [("Content-Type", "application/json"),
-                                   ("Content-Length", str(len(body)))])
-        return [body]
+            history = dict(drone_history)
+        return _json_response(start_response, history)
     if method == "POST":
         with data_lock:
             drone_history.clear()
         save_history()
-        body = json.dumps({"ok": True}).encode()
-        start_response("200 OK", [("Content-Type", "application/json"),
-                                   ("Content-Length", str(len(body)))])
-        return [body]
+        return _json_response(start_response, {"ok": True})
     if method == "PUT":
         try:
             length = int(environ.get("CONTENT_LENGTH", 0))
@@ -2021,24 +1831,10 @@ def handle_history(environ, start_response):
             with data_lock:
                 drone_history.update(imported)
             save_history()
-            body = json.dumps({"ok": True, "count": len(imported)}).encode()
-            start_response("200 OK", [("Content-Type", "application/json"),
-                                       ("Content-Length", str(len(body)))])
-            return [body]
+            return _json_response(start_response, {"ok": True, "count": len(imported)})
         except Exception as e:
-            body = json.dumps({"ok": False, "error": str(e)}).encode()
-            start_response("400 Bad Request", [("Content-Type", "application/json"),
-                                                ("Content-Length", str(len(body)))])
-            return [body]
-    start_response("405 Method Not Allowed", [("Content-Type", "text/plain")])
-    return [b"Method Not Allowed"]
-
-
-def _json_response(start_response, payload, status="200 OK"):
-    body = json.dumps(payload).encode()
-    start_response(status, [("Content-Type", "application/json"),
-                             ("Content-Length", str(len(body)))])
-    return [body]
+            return _json_response(start_response, {"ok": False, "error": str(e)}, "400 Bad Request")
+    return handle_method_not_allowed(start_response)
 
 
 def handle_record_status(start_response):
@@ -2111,8 +1907,7 @@ def handle_record_download(name, start_response):
     fname = _safe_recording_name(name)
     path = RECORDINGS_DIR / fname
     if not path.exists() or not path.is_file():
-        start_response("404 Not Found", [("Content-Type", "text/plain")])
-        return [b"Not Found"]
+        return handle_not_found(start_response)
     data = path.read_bytes()
     start_response("200 OK", [
         ("Content-Type", "application/x-ndjson"),
@@ -2153,13 +1948,7 @@ def handle_record_upload(environ, start_response):
             return _json_response(start_response, {"ok": False, "error": "invalid length"}, "400 Bad Request")
         raw = environ["wsgi.input"].read(length)
         # Filename: prefer ?name= query, else X-Filename header, else timestamp.
-        qs = environ.get("QUERY_STRING", "") or ""
-        name = ""
-        for part in qs.split("&"):
-            if part.startswith("name="):
-                from urllib.parse import unquote
-                name = unquote(part[5:])
-                break
+        name = (parse_qs(environ.get("QUERY_STRING", "") or "").get("name") or [""])[0]
         if not name:
             name = environ.get("HTTP_X_FILENAME", "") or time.strftime("upload-%Y%m%d-%H%M%S")
         fname = _safe_recording_name(name)
@@ -2307,9 +2096,13 @@ def handle_not_found(start_response):
     return [b"Not Found"]
 
 
+def handle_method_not_allowed(start_response):
+    start_response("405 Method Not Allowed", [("Content-Type", "text/plain")])
+    return [b"Method Not Allowed"]
+
+
 def handle_tile(style, z, x, y, start_response):
     """Proxy and cache a map tile. Serves from disk if cached, fetches upstream otherwise."""
-    import urllib.request
     if style not in TILE_UPSTREAM:
         start_response("404 Not Found", [("Content-Type", "text/plain")])
         return [b"Unknown style"]
@@ -2349,20 +2142,12 @@ def _maps_dir_bytes():
 def handle_map_cache(environ, start_response):
     method = environ.get("REQUEST_METHOD", "GET")
     if method == "GET":
-        body = json.dumps({"bytes": _maps_dir_bytes()}).encode()
-        start_response("200 OK", [("Content-Type", "application/json"),
-                                   ("Content-Length", str(len(body)))])
-        return [body]
+        return _json_response(start_response, {"bytes": _maps_dir_bytes()})
     if method == "POST":
-        import shutil
         if MAPS_DIR.exists():
             shutil.rmtree(MAPS_DIR)
-        body = json.dumps({"ok": True}).encode()
-        start_response("200 OK", [("Content-Type", "application/json"),
-                                   ("Content-Length", str(len(body)))])
-        return [body]
-    start_response("405 Method Not Allowed", [("Content-Type", "text/plain")])
-    return [b"Method Not Allowed"]
+        return _json_response(start_response, {"ok": True})
+    return handle_method_not_allowed(start_response)
 
 
 # --- Update helpers ---
@@ -2370,6 +2155,7 @@ def handle_map_cache(environ, start_response):
 REPO_DIR = Path(__file__).parent
 UPDATE_REMOTE = "https://github.com/Into69/dji_detect.git"
 UPDATE_BRANCH = "master"
+_HTTP_500 = "500 Internal Server Error"
 
 
 def _git(*args, **kwargs):
@@ -2428,17 +2214,11 @@ def handle_update_check(start_response):
     try:
         ok, err = _ensure_git_repo()
         if not ok:
-            body = json.dumps({"ok": False, "error": err}).encode()
-            start_response("500 Internal Server Error", [
-                ("Content-Type", "application/json"), ("Content-Length", str(len(body)))])
-            return [body]
+            return _json_response(start_response, {"ok": False, "error": err}, _HTTP_500)
 
-        rc, out, err = _git("fetch", "origin")
+        rc, _, err = _git("fetch", "origin")
         if rc != 0:
-            body = json.dumps({"ok": False, "error": f"git fetch failed: {err}"}).encode()
-            start_response("500 Internal Server Error", [
-                ("Content-Type", "application/json"), ("Content-Length", str(len(body)))])
-            return [body]
+            return _json_response(start_response, {"ok": False, "error": f"git fetch failed: {err}"}, _HTTP_500)
 
         # Determine the current branch
         rc, branch, err = _git("rev-parse", "--abbrev-ref", "HEAD")
@@ -2448,12 +2228,9 @@ def handle_update_check(start_response):
         # Check if origin/branch exists
         rc_ref, _, _ = _git("rev-parse", "--verify", f"origin/{branch}")
         if rc_ref != 0:
-            body = json.dumps({"ok": True, "branch": branch, "files": [],
-                               "behind": 0, "current": "", "latest": "",
-                               "message": f"No remote branch origin/{branch} found."}).encode()
-            start_response("200 OK", [
-                ("Content-Type", "application/json"), ("Content-Length", str(len(body)))])
-            return [body]
+            return _json_response(start_response, {
+                "ok": True, "branch": branch, "files": [], "behind": 0, "current": "", "latest": "",
+                "message": f"No remote branch origin/{branch} found."})
 
         # Count commits behind
         rc, rev_list, _ = _git("rev-list", "--count", f"HEAD..origin/{branch}")
@@ -2481,7 +2258,7 @@ def handle_update_check(start_response):
                             "file": filepath,
                         })
 
-        body = json.dumps({
+        return _json_response(start_response, {
             "ok": True,
             "branch": branch,
             "behind": behind,
@@ -2489,16 +2266,10 @@ def handle_update_check(start_response):
             "latest": latest_hash,
             "latest_message": latest_msg,
             "files": files,
-        }).encode()
-        start_response("200 OK", [
-            ("Content-Type", "application/json"), ("Content-Length", str(len(body)))])
-        return [body]
+        })
 
     except Exception as e:
-        body = json.dumps({"ok": False, "error": str(e)}).encode()
-        start_response("500 Internal Server Error", [
-            ("Content-Type", "application/json"), ("Content-Length", str(len(body)))])
-        return [body]
+        return _json_response(start_response, {"ok": False, "error": str(e)}, _HTTP_500)
 
 
 def handle_update_download(start_response):
@@ -2506,10 +2277,7 @@ def handle_update_download(start_response):
     try:
         ok, err = _ensure_git_repo()
         if not ok:
-            body = json.dumps({"ok": False, "error": err}).encode()
-            start_response("500 Internal Server Error", [
-                ("Content-Type", "application/json"), ("Content-Length", str(len(body)))])
-            return [body]
+            return _json_response(start_response, {"ok": False, "error": err}, _HTTP_500)
 
         rc, branch, _ = _git("rev-parse", "--abbrev-ref", "HEAD")
         if rc != 0 or not branch:
@@ -2517,36 +2285,22 @@ def handle_update_download(start_response):
 
         rc, out, err = _git("pull", "origin", branch)
         if rc != 0:
-            body = json.dumps({"ok": False, "error": f"git pull failed: {err or out}"}).encode()
-            start_response("500 Internal Server Error", [
-                ("Content-Type", "application/json"), ("Content-Length", str(len(body)))])
-            return [body]
-
-        body = json.dumps({"ok": True, "output": out}).encode()
-        start_response("200 OK", [
-            ("Content-Type", "application/json"), ("Content-Length", str(len(body)))])
-        return [body]
+            return _json_response(start_response, {"ok": False, "error": f"git pull failed: {err or out}"}, _HTTP_500)
+        return _json_response(start_response, {"ok": True, "output": out})
 
     except Exception as e:
-        body = json.dumps({"ok": False, "error": str(e)}).encode()
-        start_response("500 Internal Server Error", [
-            ("Content-Type", "application/json"), ("Content-Length", str(len(body)))])
-        return [body]
+        return _json_response(start_response, {"ok": False, "error": str(e)}, _HTTP_500)
 
 
 def handle_update_restart(start_response):
     """Restart the application by re-executing the current process."""
-    body = json.dumps({"ok": True, "message": "Restarting…"}).encode()
-    start_response("200 OK", [
-        ("Content-Type", "application/json"), ("Content-Length", str(len(body)))])
-
     def _restart():
         time.sleep(1)
         python = sys.executable
         os.execv(python, [python] + sys.argv)
 
     threading.Thread(target=_restart, daemon=True).start()
-    return [body]
+    return _json_response(start_response, {"ok": True, "message": "Restarting…"})
 
 
 # --- WSGI app ---
@@ -2628,8 +2382,7 @@ def application(environ, start_response):
             return handle_tile(style, z, x, y, start_response)
 
     if method != "GET":
-        start_response("405 Method Not Allowed", [("Content-Type", "text/plain")])
-        return [b"Method Not Allowed"]
+        return handle_method_not_allowed(start_response)
 
     if path == "/":       return handle_index(start_response)
     if path == "/drones": return handle_drones(start_response)
@@ -2676,11 +2429,7 @@ if __name__ == "__main__":
         slat = antsdr_config.get("sensor_lat", 0.0)
         slon = antsdr_config.get("sensor_lon", 0.0)
         if slat and slon:
-            sensor_position.update({
-                "mode": 2, "lat": slat, "lon": slon, "alt": None,
-                "sats_used": 0, "sats_visible": 0, "gps_time": None,
-                "last_fix_wall_time": time.time(),
-            })
+            sensor_position.update(_fixed_position(slat, slon))
             print(f"[Config] Manual sensor location applied: {slat}, {slon}")
 
     if args.antsdr_host != parser.get_default("antsdr_host"):
