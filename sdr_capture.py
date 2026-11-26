@@ -838,7 +838,11 @@ class SdrCaptureManager:
             if self._dev is None:
                 continue
             try:
-                self._capture(req, self.config())
+                # Same cfg the device was just configured (and the buffer sized) with,
+                # not a newer one: a mid-wait change of rate/duration would otherwise
+                # set the sample count from settings the hardware isn't running.
+                # The next loop applies the new settings (and re-runs the self-test).
+                self._capture(req, cfg)
             except Exception as e:
                 msg = f"capture failed: {e}"
                 print(f"[SDR] {msg}")
@@ -867,6 +871,12 @@ class SdrCaptureManager:
         stamp = datetime.datetime.fromtimestamp(t_start).strftime("%Y%m%d-%H%M%S")
         sn = drone.get("serial_number") or "test"
         base = f"{stamp}_{_safe(sn)}_{req['freq_mhz']:.1f}MHz"
+        # Two captures of the same serial+freq within one second would share a name
+        # and silently overwrite; add a _2, _3, ... suffix instead.
+        n = 1
+        while (CAPTURES_DIR / f"{base}.sigmf-data").exists() or (CAPTURES_DIR / f"{base}.sigmf-meta").exists():
+            n += 1
+            base = f"{stamp}_{_safe(sn)}_{req['freq_mhz']:.1f}MHz_{n}"
         data_path = CAPTURES_DIR / f"{base}.sigmf-data"
         out[: 2 * got].tofile(data_path)
 

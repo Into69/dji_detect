@@ -45,6 +45,10 @@ logging.getLogger("waitress").setLevel(logging.CRITICAL)
 # --- Shared state ---
 drone_data: dict = {}       # serial_number -> latest drone dict
 sensor_position: dict = {}  # lat, lon, alt, mode — current gpsd fix
+# Settings. NOT guarded by data_lock: it is written only by load_config at startup
+# and by the /config, /zones and /sdr/config POST handlers, one key at a time, and
+# readers take individual values. A GET racing a POST can see a mix of old and new
+# values; take a dedicated lock if settings ever need to change together atomically.
 antsdr_config: dict = {
     "host":            "0.0.0.0",
     "port":            52002,        # UDP listen port (DragonScope-bridged firmware)
@@ -201,6 +205,24 @@ def _sanitize_ring_radii(raw) -> list:
     return out[:20]  # cap to keep the map sane
 
 
+def _parse_bool(v) -> bool:
+    """bool() that understands strings: "false", "0", "off", "no" and "" are False.
+
+    Plain bool("false") is True, which would flip hand-edited settings on.
+    """
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, (int, float)):
+        return bool(v)
+    if isinstance(v, str):
+        t = v.strip().lower()
+        if t in ("true", "1", "yes", "on"):
+            return True
+        if t in ("false", "0", "no", "off", ""):
+            return False
+    raise ValueError(f"not a boolean: {v!r}")
+
+
 # dd-config.json key -> (antsdr_config key, type). The single list of scalar
 # settings shared by load_config, save_config and GET /config. Settings that need
 # sanitizing (range_ring_radii_m, geofence_zones, sdr) are handled separately.
@@ -212,21 +234,21 @@ CONFIG_FIELDS = {
     "serial_port":            ("serial_port",            str),
     "serial_baud":            ("serial_baud",            int),
     "map_style":              ("map_style",              str),
-    "auto_fit":               ("auto_fit",               bool),
-    "auto_track":             ("auto_track",             bool),
-    "show_lines":             ("show_lines",             bool),
-    "range_rings":            ("range_rings",            bool),
+    "auto_fit":               ("auto_fit",               _parse_bool),
+    "auto_track":             ("auto_track",             _parse_bool),
+    "show_lines":             ("show_lines",             _parse_bool),
+    "range_rings":            ("range_rings",            _parse_bool),
     "range_ring_color":       ("range_ring_color",       str),
     "range_ring_opacity":     ("range_ring_opacity",     float),
-    "show_trails":            ("show_trails",            bool),
-    "proximity_alerts":       ("proximity_alerts",       bool),
+    "show_trails":            ("show_trails",            _parse_bool),
+    "proximity_alerts":       ("proximity_alerts",       _parse_bool),
     "proximity_distance_m":   ("proximity_distance_m",   int),
-    "proximity_discord":      ("proximity_discord",      bool),
+    "proximity_discord":      ("proximity_discord",      _parse_bool),
     "proximity_cooldown_s":   ("proximity_cooldown_s",   int),
-    "tts_enabled":            ("tts_enabled",            bool),
-    "tts_announce_new":       ("tts_announce_new",       bool),
-    "tts_announce_proximity": ("tts_announce_proximity", bool),
-    "tts_announce_zone":      ("tts_announce_zone",      bool),
+    "tts_enabled":            ("tts_enabled",            _parse_bool),
+    "tts_announce_new":       ("tts_announce_new",       _parse_bool),
+    "tts_announce_proximity": ("tts_announce_proximity", _parse_bool),
+    "tts_announce_zone":      ("tts_announce_zone",      _parse_bool),
     "tts_voice":              ("tts_voice",              str),
     "tts_rate":               ("tts_rate",               float),
     "sensor_icon":            ("sensor_icon",            str),
@@ -235,7 +257,7 @@ CONFIG_FIELDS = {
     "sensor_lat":             ("sensor_lat",             float),
     "sensor_lon":             ("sensor_lon",             float),
     "discord_webhook":        ("discord_webhook",        str),
-    "tak_enabled":            ("tak_enabled",            bool),
+    "tak_enabled":            ("tak_enabled",            _parse_bool),
     "tak_protocol":           ("tak_protocol",           str),
     "tak_host":               ("tak_host",               str),
     "tak_port":               ("tak_port",               int),
@@ -256,9 +278,16 @@ def load_config():
         return
     try:
         saved = json.loads(CONFIG_FILE.read_text())
+        if not isinstance(saved, dict):
+            raise ValueError("expected a JSON object")
+        # One bad or null value skips only that setting, not everything after it.
         for json_key, (cfg_key, cast) in CONFIG_FIELDS.items():
-            if json_key in saved:
+            if saved.get(json_key) is None:
+                continue
+            try:
                 antsdr_config[cfg_key] = cast(saved[json_key])
+            except (TypeError, ValueError) as e:
+                print(f"[Config] Ignoring {json_key}={saved[json_key]!r}: {e}")
         if isinstance(saved.get("geofence_zones"), list):
             antsdr_config["geofence_zones"] = _sanitize_zones(saved["geofence_zones"])
         if isinstance(saved.get("sdr"), dict):
@@ -642,10 +671,13 @@ def _zone_embed(drone: dict, zone: dict) -> dict:
         _altitude_field(drone),
         {"name": "Speed", "value": f"{drone.get('horizontal_speed', 0):.1f} m/s", "inline": True},
     ]
-    # Zone color hex like "#f85149" → int 0xf85149 for embed.
+    # Zone color hex like "#f85149" → int 0xf85149 for embed. Discord rejects the
+    # whole embed (HTTP 400) for anything above 0xFFFFFF, e.g. "#rrggbbaa".
     try:
         color_int = int((zone.get("color") or "#f85149").lstrip("#"), 16)
     except ValueError:
+        color_int = 0xf85149
+    if not 0 <= color_int <= 0xFFFFFF:
         color_int = 0xf85149
     return {
         "title":       f"\u26a0\ufe0f Geofence Alert: {zone.get('name', 'Zone')}",
@@ -704,7 +736,11 @@ def _build_cot_event(uid: str, cot_type: str, lat: float, lon: float, hae: float
 
 
 def _tak_target():
-    """(host, port, protocol) when TAK output is enabled and has a host, else None."""
+    """(host, port, protocol) when TAK output is enabled and has a host, else None.
+
+    Raises ValueError for a non-integer port, so callers must call it inside
+    their try block (an exception escaping would kill the sensor-beacon thread).
+    """
     if not antsdr_config.get("tak_enabled"):
         return None
     host = antsdr_config.get("tak_host", "").strip()
@@ -737,11 +773,10 @@ def _tak_send(events: list, target: tuple):
 
 def _send_tak(drone: dict):
     """Send CoT events for drone, pilot, and home to the TAK server."""
-    target = _tak_target()
-    if not target:
-        return
-
     try:
+        target = _tak_target()
+        if not target:
+            return
         serial = drone.get("serial_number", "unknown")
         model  = drone.get("device_type", "Unknown")
         dlat   = drone.get("drone_lat", 0)
@@ -795,15 +830,15 @@ TAK_SENSOR_INTERVAL = 30  # seconds between sensor position beacons to TAK
 
 def _send_tak_sensor():
     """Send the sensor's current GPS position as a CoT event to the TAK server."""
-    target = _tak_target()
-    if not target:
-        return
-    name = _sensor_name()
-    with data_lock:
-        pos = sensor_position.copy()
-    if not pos.get("lat") or not pos.get("lon"):
-        return
     try:
+        target = _tak_target()
+        if not target:
+            return
+        name = _sensor_name()
+        with data_lock:
+            pos = sensor_position.copy()
+        if not pos.get("lat") or not pos.get("lon"):
+            return
         event = _build_cot_event(
             uid=f"DJI-Detect-Sensor-{name.replace(' ', '_')}",
             cot_type="a-f-G-U-C",
@@ -1719,23 +1754,23 @@ def handle_config_post(environ, start_response):
 
         antsdr_config["connection_type"] = conn_type
         antsdr_config["map_style"]       = str(body.get("map_style",       antsdr_config["map_style"]))
-        antsdr_config["auto_fit"]        = bool(body.get("auto_fit",       antsdr_config["auto_fit"]))
-        antsdr_config["auto_track"]      = bool(body.get("auto_track",     antsdr_config["auto_track"]))
-        antsdr_config["show_lines"]      = bool(body.get("show_lines",     antsdr_config["show_lines"]))
-        antsdr_config["range_rings"]     = bool(body.get("range_rings",    antsdr_config["range_rings"]))
+        antsdr_config["auto_fit"]        = _parse_bool(body.get("auto_fit",       antsdr_config["auto_fit"]))
+        antsdr_config["auto_track"]      = _parse_bool(body.get("auto_track",     antsdr_config["auto_track"]))
+        antsdr_config["show_lines"]      = _parse_bool(body.get("show_lines",     antsdr_config["show_lines"]))
+        antsdr_config["range_rings"]     = _parse_bool(body.get("range_rings",    antsdr_config["range_rings"]))
         antsdr_config["range_ring_color"]   = str(body.get("range_ring_color",   antsdr_config["range_ring_color"]))
         antsdr_config["range_ring_opacity"] = max(0.0, min(1.0, float(body.get("range_ring_opacity", antsdr_config["range_ring_opacity"]))))
         if "range_ring_radii_m" in body:
             antsdr_config["range_ring_radii_m"] = _sanitize_ring_radii(body.get("range_ring_radii_m"))
-        antsdr_config["show_trails"]     = bool(body.get("show_trails",    antsdr_config["show_trails"]))
-        antsdr_config["proximity_alerts"]     = bool(body.get("proximity_alerts",     antsdr_config["proximity_alerts"]))
+        antsdr_config["show_trails"]     = _parse_bool(body.get("show_trails",    antsdr_config["show_trails"]))
+        antsdr_config["proximity_alerts"]     = _parse_bool(body.get("proximity_alerts",     antsdr_config["proximity_alerts"]))
         antsdr_config["proximity_distance_m"] = max(10, int(body.get("proximity_distance_m", antsdr_config["proximity_distance_m"])))
-        antsdr_config["proximity_discord"]    = bool(body.get("proximity_discord",    antsdr_config["proximity_discord"]))
+        antsdr_config["proximity_discord"]    = _parse_bool(body.get("proximity_discord",    antsdr_config["proximity_discord"]))
         antsdr_config["proximity_cooldown_s"] = max(0, int(body.get("proximity_cooldown_s", antsdr_config["proximity_cooldown_s"])))
-        antsdr_config["tts_enabled"]            = bool(body.get("tts_enabled",            antsdr_config["tts_enabled"]))
-        antsdr_config["tts_announce_new"]       = bool(body.get("tts_announce_new",       antsdr_config["tts_announce_new"]))
-        antsdr_config["tts_announce_proximity"] = bool(body.get("tts_announce_proximity", antsdr_config["tts_announce_proximity"]))
-        antsdr_config["tts_announce_zone"]      = bool(body.get("tts_announce_zone",      antsdr_config["tts_announce_zone"]))
+        antsdr_config["tts_enabled"]            = _parse_bool(body.get("tts_enabled",            antsdr_config["tts_enabled"]))
+        antsdr_config["tts_announce_new"]       = _parse_bool(body.get("tts_announce_new",       antsdr_config["tts_announce_new"]))
+        antsdr_config["tts_announce_proximity"] = _parse_bool(body.get("tts_announce_proximity", antsdr_config["tts_announce_proximity"]))
+        antsdr_config["tts_announce_zone"]      = _parse_bool(body.get("tts_announce_zone",      antsdr_config["tts_announce_zone"]))
         antsdr_config["tts_voice"]              = str(body.get("tts_voice",               antsdr_config["tts_voice"]))
         antsdr_config["tts_rate"]               = max(0.5, min(2.0, float(body.get("tts_rate", antsdr_config["tts_rate"]))))
         antsdr_config["sensor_icon"]            = str(body.get("sensor_icon",            antsdr_config["sensor_icon"]))
@@ -1749,7 +1784,7 @@ def handle_config_post(environ, start_response):
         elif antsdr_config["sensor_location_source"] == "gpsd":
             _ensure_gpsd_poller()
         antsdr_config["discord_webhook"] = str(body.get("discord_webhook", antsdr_config["discord_webhook"])).strip()
-        antsdr_config["tak_enabled"]     = bool(body.get("tak_enabled",    antsdr_config["tak_enabled"]))
+        antsdr_config["tak_enabled"]     = _parse_bool(body.get("tak_enabled",    antsdr_config["tak_enabled"]))
         antsdr_config["tak_protocol"]    = str(body.get("tak_protocol",    antsdr_config["tak_protocol"])).strip()
         antsdr_config["tak_host"]        = str(body.get("tak_host",        antsdr_config["tak_host"])).strip()
         antsdr_config["tak_port"]        = int(body.get("tak_port",        antsdr_config["tak_port"]))
