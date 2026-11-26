@@ -2136,6 +2136,28 @@ def handle_method_not_allowed(start_response):
     return [b"Method Not Allowed"]
 
 
+STATIC_DIR = TEMPLATE_DIR / "static"
+_STATIC_TYPES = {".png": "image/png", ".ico": "image/x-icon", ".svg": "image/svg+xml"}
+
+
+def handle_static(name, start_response):
+    """Serve a file from web/static/ (icons). Plain file names only — no path separators
+    or leading dot — and only known types, so nothing outside STATIC_DIR is reachable."""
+    ctype = _STATIC_TYPES.get(Path(name).suffix.lower())
+    if not ctype or not re.fullmatch(r"[A-Za-z0-9_-][A-Za-z0-9._-]*", name):
+        return handle_not_found(start_response)
+    path = STATIC_DIR / name
+    if not path.is_file():
+        return handle_not_found(start_response)
+    data = path.read_bytes()
+    start_response("200 OK", [
+        ("Content-Type", ctype),
+        ("Content-Length", str(len(data))),
+        ("Cache-Control", "public, max-age=86400"),
+    ])
+    return [data]
+
+
 def handle_tile(style, z, x, y, start_response):
     """Proxy and cache a map tile. Serves from disk if cached, fetches upstream otherwise."""
     if style not in TILE_UPSTREAM:
@@ -2425,6 +2447,10 @@ def application(environ, start_response):
     if path == "/stream": return handle_stream(start_response)
     if path == "/raw":          return handle_raw(start_response)
     if path == "/serial-ports": return handle_serial_ports(start_response)
+    if path.startswith("/static/"):
+        return handle_static(path[len("/static/"):], start_response)
+    if path == "/favicon.ico":  # browsers that ignore <link rel="icon">
+        return handle_static("icon-32.png", start_response)
 
     return handle_not_found(start_response)
 
